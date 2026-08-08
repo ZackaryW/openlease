@@ -32,6 +32,7 @@ Feature: Resolve extension configuration from an OpenLease space
     Given root, child A, and child B configuration scopes participate in one durable space
     When the host attaches a reusable configuration pack and resolves each child separately
     Then the pack participates between machine and repository configuration for both children
+    And each resolved context identifies the participating pack and its observed generation
     And no configuration scope or pack becomes a child space or leased authority
     And the affected claim remains unchanged
 
