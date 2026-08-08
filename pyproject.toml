@@ -6,7 +6,7 @@ readme = "README.md"
 authors = [
     { name = "ZackaryW", email = "gitzackw@gmail.com" }
 ]
-requires-python = ">=3.14"
+requires-python = ">=3.11"
 dependencies = [
     "filelock>=3.19.1",
 ]
@@ -39,7 +39,7 @@ pythonpath = ["."]
 
 [tool.ruff]
 line-length = 88
-target-version = "py314"
+target-version = "py311"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]

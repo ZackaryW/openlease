@@ -304,7 +304,7 @@ def then_context_provenance(context) -> None:
     assert all(item.access_role for item in resolved.members)
     try:
         resolved.space_id = "changed"
-    except AttributeError, TypeError:
+    except (AttributeError, TypeError):
         pass
     else:
         raise AssertionError("extension context is mutable")

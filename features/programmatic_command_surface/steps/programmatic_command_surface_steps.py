@@ -10,6 +10,7 @@ from pathlib import Path
 from behave import given, then, when
 from typer.testing import CliRunner
 
+from features.support.distribution import DistributionProbe, accepts_python
 from features.support.openlease_support import (
     ensure_repositories,
     ensure_topology,
@@ -21,6 +22,31 @@ from openlease import (
 )
 from openlease.cli import app
 from openlease.utils.openspec_adapter import OpenSpecWorkset
+from openlease.utils.processes import SubprocessRunner, require_success
+
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
+
+
+def _python_311() -> Path:
+    result = SubprocessRunner().run(("uv", "python", "find", "3.11"), cwd=PROJECT_ROOT)
+    require_success(result, "Python 3.11 discovery")
+    return Path(result.stdout.strip())
+
+
+def _install_distribution(context, *, extra: str | None = None) -> None:
+    context.distribution_probe = DistributionProbe(PROJECT_ROOT, SubprocessRunner())
+    context.python_311 = _python_311()
+    context.distribution_artifact = context.distribution_probe.build(
+        context.root / "distribution", python=context.python_311
+    )
+    context.distribution_python = context.distribution_probe.create_environment(
+        context.root / "installed", python=context.python_311
+    )
+    context.distribution_probe.install(
+        context.distribution_python,
+        context.distribution_artifact,
+        extra=extra,
+    )
 
 
 @given("OpenLease is installed without its CLI extra")
@@ -32,6 +58,12 @@ def base_install(context) -> None:
 
 @when("a Python consumer imports the public package")
 def import_public(context) -> None:
+    if hasattr(context, "distribution_python"):
+        context.process = context.distribution_probe.invoke(
+            context.distribution_python,
+            ("-c", context.import_script),
+        )
+        return
     context.process = subprocess.run(
         (sys.executable, "-c", context.import_script),
         check=False,
@@ -55,6 +87,77 @@ def lifecycle_exported(context) -> None:
         hasattr(ExportedOpenLease, name)
         for name in ("lock", "defer", "reconcile_apply")
     )
+
+
+@given("a built OpenLease distribution")
+def built_distribution(context) -> None:
+    context.distribution_probe = DistributionProbe(PROJECT_ROOT, SubprocessRunner())
+    context.python_311 = _python_311()
+    context.distribution_artifact = context.distribution_probe.build(
+        context.root / "distribution", python=context.python_311
+    )
+
+
+@when("a package installer evaluates its Python requirement")
+def evaluate_python_requirement(context) -> None:
+    context.python_requirement = context.distribution_artifact.requires_python
+
+
+@then("Python 3.11 and newer interpreters are accepted without an upper bound")
+def accepts_supported_python(context) -> None:
+    assert context.python_requirement == ">=3.11"
+    assert accepts_python(context.python_requirement, "3.11")
+    assert accepts_python(context.python_requirement, "999.0")
+
+
+@then("interpreters older than Python 3.11 are rejected")
+def rejects_older_python(context) -> None:
+    assert not accepts_python(context.python_requirement, "3.10")
+
+
+@given("the base OpenLease distribution is installed with Python 3.11")
+def base_distribution_on_python_311(context) -> None:
+    _install_distribution(context)
+    context.import_script = (
+        "import sys; from openlease import OpenLease; "
+        "assert 'typer' not in sys.modules; "
+        "assert all(hasattr(OpenLease, name) for name in "
+        "('lock', 'defer', 'reconcile_apply'))"
+    )
+
+
+@then("the complete public lifecycle matches a newer supported interpreter")
+def installed_lifecycle_matches(context) -> None:
+    assert context.process.returncode == 0, context.process.stderr
+
+
+@given("the OpenLease CLI extra is installed with Python 3.11")
+def cli_distribution_on_python_311(context) -> None:
+    _install_distribution(context, extra="cli")
+
+
+@when("a user invokes a public command with JSON output")
+def invoke_installed_cli(context) -> None:
+    context.cli_process = context.distribution_probe.invoke(
+        context.distribution_python,
+        (
+            "-m",
+            "openlease.cli",
+            "--state-root",
+            str(context.root / "installed-state"),
+            "--json",
+            "status",
+        ),
+    )
+
+
+@then("it preserves the documented result envelope and process status")
+def installed_cli_contract(context) -> None:
+    assert context.cli_process.returncode == 0, context.cli_process.stderr
+    assert context.cli_process.stdout.count("\n") == 1
+    envelope = json.loads(context.cli_process.stdout)
+    assert envelope["ok"] is True
+    assert envelope["operation"] == "status"
 
 
 @given("the optional CLI extra is installed")
@@ -81,6 +184,11 @@ def cli_runs_commands(context) -> None:
 
 @then("the command delegates to the same public library lifecycle")
 def cli_shared_lifecycle(context) -> None:
+    if hasattr(context, "cli_process"):
+        assert context.cli_process.returncode == 0, context.cli_process.stderr
+        envelope = json.loads(context.cli_process.stdout)
+        assert envelope["operation"] == "status"
+        return
     assert context.result.data["spaces"][0].identifier == "cli-space"
 
 

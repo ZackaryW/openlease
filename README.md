@@ -23,7 +23,7 @@ Install the optional terminal surface with:
 uv add "openlease[cli]"
 ```
 
-OpenLease requires Python 3.14 or newer, Git, and the OpenSpec CLI when workset
+OpenLease requires Python 3.11 or newer, Git, and the OpenSpec CLI when workset
 projections are opened or prepared.
 
 ## Model
