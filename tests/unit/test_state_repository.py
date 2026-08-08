@@ -34,6 +34,20 @@ def test_atomically_commits_one_generation_and_rejects_a_stale_writer(
         repository.mutate(0, lambda current: current)
 
 
+def test_preserves_a_version_one_index_before_the_first_version_two_write(
+    tmp_path: Path,
+) -> None:
+    repository = StateRepository(tmp_path)
+    version_one = b'{"schema_version":1,"generation":4}\n'
+    repository.index_path.write_bytes(version_one)
+
+    updated = repository.mutate(4, lambda current: current)
+
+    assert updated.schema_version == 2
+    assert repository.backup_path.read_bytes() == version_one
+    assert repository.load().generation == 5
+
+
 def test_preserves_the_previous_index_when_replacement_fails(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

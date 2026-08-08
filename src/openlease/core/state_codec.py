@@ -95,6 +95,42 @@ class ReconciliationRecord:
 
 
 @dataclass(frozen=True, slots=True)
+class ExtensionRootPolicyRecord:
+    extension_id: str
+    product_root: str | None = None
+    configuration_root: str | None = None
+    data_root: str | None = None
+    cache_root: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ConfigurationPackRecord:
+    identifier: str
+    extension_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class ConfigurationSourceRecord:
+    identifier: str
+    extension_id: str
+    scope_kind: str
+    scope_id: str | None
+    source_kind: str
+    path: str
+    repository_id: str | None = None
+    order: int = 0
+    revision: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class SpacePackAttachmentRecord:
+    space_id: str
+    extension_id: str
+    pack_id: str
+    order: int = 0
+
+
+@dataclass(frozen=True, slots=True)
 class OpenLeaseState:
     generation: int = 0
     repositories: tuple[RepositoryRecord, ...] = ()
@@ -105,7 +141,12 @@ class OpenLeaseState:
     spaces: tuple[SpaceRecord, ...] = ()
     leases: tuple[LeaseRecord, ...] = ()
     reconciliations: tuple[ReconciliationRecord, ...] = ()
-    schema_version: int = 1
+    configuration_generation: int = 0
+    extension_roots: tuple[ExtensionRootPolicyRecord, ...] = ()
+    configuration_packs: tuple[ConfigurationPackRecord, ...] = ()
+    configuration_sources: tuple[ConfigurationSourceRecord, ...] = ()
+    space_pack_attachments: tuple[SpacePackAttachmentRecord, ...] = ()
+    schema_version: int = 2
 
 
 def structural_key(value: object) -> str:
@@ -139,23 +180,29 @@ def decode_state(source: bytes) -> OpenLeaseState:
         raise StateFormatError("invalid OpenLease state JSON") from error
     if not isinstance(value, dict):
         raise StateFormatError("OpenLease state must be a JSON object")
-    _require_keys(
-        value,
-        {
-            "schema_version",
-            "generation",
-            "repositories",
-            "authorities",
-            "graph_generation",
-            "parents",
-            "dependencies",
-            "spaces",
-            "leases",
-            "reconciliations",
-        },
-    )
-    if value.get("schema_version") != 1:
+    schema_version = value.get("schema_version")
+    common_keys = {
+        "schema_version",
+        "generation",
+        "repositories",
+        "authorities",
+        "graph_generation",
+        "parents",
+        "dependencies",
+        "spaces",
+        "leases",
+        "reconciliations",
+    }
+    version_two_keys = common_keys | {
+        "configuration_generation",
+        "extension_roots",
+        "configuration_packs",
+        "configuration_sources",
+        "space_pack_attachments",
+    }
+    if schema_version not in {1, 2}:
         raise StateFormatError("unsupported OpenLease state schema")
+    _require_keys(value, common_keys if schema_version == 1 else version_two_keys)
     generation = value.get("generation")
     if (
         not isinstance(generation, int)
@@ -191,6 +238,31 @@ def decode_state(source: bytes) -> OpenLeaseState:
         _reconciliation(item)
         for item in _object_list(value.get("reconciliations", []), "reconciliations")
     )
+    configuration_generation = _nonnegative_int(
+        value.get("configuration_generation", 0), "configuration generation"
+    )
+    extension_roots = tuple(
+        _extension_root(item)
+        for item in _object_list(value.get("extension_roots", []), "extension roots")
+    )
+    configuration_packs = tuple(
+        _configuration_pack(item)
+        for item in _object_list(
+            value.get("configuration_packs", []), "configuration packs"
+        )
+    )
+    configuration_sources = tuple(
+        _configuration_source(item)
+        for item in _object_list(
+            value.get("configuration_sources", []), "configuration sources"
+        )
+    )
+    space_pack_attachments = tuple(
+        _space_pack_attachment(item)
+        for item in _object_list(
+            value.get("space_pack_attachments", []), "space pack attachments"
+        )
+    )
     return validate_state(
         OpenLeaseState(
             generation=generation,
@@ -202,6 +274,11 @@ def decode_state(source: bytes) -> OpenLeaseState:
             spaces=spaces,
             leases=leases,
             reconciliations=reconciliations,
+            configuration_generation=configuration_generation,
+            extension_roots=extension_roots,
+            configuration_packs=configuration_packs,
+            configuration_sources=configuration_sources,
+            space_pack_attachments=space_pack_attachments,
         )
     )
 
@@ -219,11 +296,25 @@ def encode_state(state: OpenLeaseState) -> bytes:
         "spaces": [asdict(item) for item in state.spaces],
         "leases": [asdict(item) for item in state.leases],
         "reconciliations": [asdict(item) for item in state.reconciliations],
+        "configuration_generation": state.configuration_generation,
+        "extension_roots": [asdict(item) for item in state.extension_roots],
+        "configuration_packs": [
+            asdict(item) for item in state.configuration_packs
+        ],
+        "configuration_sources": [
+            asdict(item) for item in state.configuration_sources
+        ],
+        "space_pack_attachments": [
+            asdict(item) for item in state.space_pack_attachments
+        ],
     }
     return (json.dumps(document, indent=2, sort_keys=True) + "\n").encode("utf-8")
 
 
 def validate_state(state: OpenLeaseState) -> OpenLeaseState:
+    if state.schema_version != 2:
+        raise StateFormatError("unsupported OpenLease state schema")
+    _nonnegative_int(state.configuration_generation, "configuration generation")
     repository_ids = [item.identifier for item in state.repositories]
     authority_ids = [item.identifier for item in state.authorities]
     space_ids = [item.identifier for item in state.spaces]
@@ -265,6 +356,81 @@ def validate_state(state: OpenLeaseState) -> OpenLeaseState:
             raise StateFormatError("lease has a missing endpoint")
     if len({item.authority_id for item in state.leases}) != len(state.leases):
         raise StateFormatError("duplicate authority lease")
+    root_extension_ids = [item.extension_id for item in state.extension_roots]
+    if len(root_extension_ids) != len(set(root_extension_ids)):
+        raise StateFormatError("duplicate extension root policy")
+    pack_keys = [
+        (item.extension_id, item.identifier) for item in state.configuration_packs
+    ]
+    if len(pack_keys) != len(set(pack_keys)):
+        raise StateFormatError("duplicate configuration pack")
+    source_keys = [
+        (item.extension_id, item.identifier) for item in state.configuration_sources
+    ]
+    if len(source_keys) != len(set(source_keys)):
+        raise StateFormatError("duplicate configuration source")
+    known_packs = set(pack_keys)
+    for source in state.configuration_sources:
+        if source.scope_kind not in {
+            "machine",
+            "pack",
+            "space",
+            "repository",
+            "authority",
+        }:
+            raise StateFormatError("invalid configuration source scope")
+        if source.source_kind not in {"repository", "external"}:
+            raise StateFormatError("invalid configuration source kind")
+        _nonnegative_int(source.order, "configuration source order")
+        _nonnegative_int(source.revision, "configuration source revision")
+        if source.scope_kind == "machine" and source.scope_id is not None:
+            raise StateFormatError("machine source cannot have a scope identifier")
+        if source.scope_kind != "machine" and source.scope_id is None:
+            raise StateFormatError(
+                "configuration source scope is missing an identifier"
+            )
+        if source.scope_kind == "pack" and (
+            source.extension_id,
+            source.scope_id,
+        ) not in known_packs:
+            raise StateFormatError("configuration source has a missing pack")
+        if source.scope_kind == "space" and source.scope_id not in known_spaces:
+            raise StateFormatError("configuration source has a missing space")
+        if (
+            source.scope_kind == "repository"
+            and source.scope_id not in known_repositories
+        ):
+            raise StateFormatError("configuration source has a missing repository")
+        if (
+            source.scope_kind == "authority"
+            and source.scope_id not in known_authorities
+        ):
+            raise StateFormatError("configuration source has a missing authority")
+        if source.source_kind == "repository":
+            if source.repository_id not in known_repositories:
+                raise StateFormatError("configuration source repository is missing")
+            relative = Path(source.path)
+            if relative.is_absolute() or ".." in relative.parts:
+                raise StateFormatError("repository configuration path must be relative")
+        else:
+            if source.repository_id is not None:
+                raise StateFormatError("external configuration source has a repository")
+            if not Path(source.path).is_absolute():
+                raise StateFormatError(
+                    "external configuration source path must be absolute"
+                )
+    attachment_keys = [
+        (item.space_id, item.extension_id, item.pack_id)
+        for item in state.space_pack_attachments
+    ]
+    if len(attachment_keys) != len(set(attachment_keys)):
+        raise StateFormatError("duplicate space pack attachment")
+    for attachment in state.space_pack_attachments:
+        _nonnegative_int(attachment.order, "space pack attachment order")
+        if attachment.space_id not in known_spaces:
+            raise StateFormatError("space pack attachment has a missing space")
+        if (attachment.extension_id, attachment.pack_id) not in known_packs:
+            raise StateFormatError("space pack attachment has a missing pack")
     return state
 
 
@@ -430,6 +596,80 @@ def _reconciliation(value: dict[str, Any]) -> ReconciliationRecord:
         _optional_string(value.get("strategy"), "reconciliation strategy"),
         _string(value.get("status", "pending"), "reconciliation status"),
         _optional_string(value.get("result_commit"), "reconciliation result commit"),
+    )
+
+
+def _extension_root(value: dict[str, Any]) -> ExtensionRootPolicyRecord:
+    _require_keys(
+        value,
+        {
+            "extension_id",
+            "product_root",
+            "configuration_root",
+            "data_root",
+            "cache_root",
+        },
+    )
+    return ExtensionRootPolicyRecord(
+        extension_id=_string(value.get("extension_id"), "extension root identifier"),
+        product_root=_optional_string(value.get("product_root"), "product root"),
+        configuration_root=_optional_string(
+            value.get("configuration_root"), "configuration root"
+        ),
+        data_root=_optional_string(value.get("data_root"), "data root"),
+        cache_root=_optional_string(value.get("cache_root"), "cache root"),
+    )
+
+
+def _configuration_pack(value: dict[str, Any]) -> ConfigurationPackRecord:
+    _require_keys(value, {"identifier", "extension_id"})
+    return ConfigurationPackRecord(
+        identifier=_string(value.get("identifier"), "configuration pack identifier"),
+        extension_id=_string(value.get("extension_id"), "pack extension identifier"),
+    )
+
+
+def _configuration_source(value: dict[str, Any]) -> ConfigurationSourceRecord:
+    _require_keys(
+        value,
+        {
+            "identifier",
+            "extension_id",
+            "scope_kind",
+            "scope_id",
+            "source_kind",
+            "path",
+            "repository_id",
+            "order",
+            "revision",
+        },
+    )
+    return ConfigurationSourceRecord(
+        identifier=_string(value.get("identifier"), "configuration source identifier"),
+        extension_id=_string(value.get("extension_id"), "source extension identifier"),
+        scope_kind=_string(value.get("scope_kind"), "configuration source scope"),
+        scope_id=_optional_string(value.get("scope_id"), "source scope identifier"),
+        source_kind=_string(value.get("source_kind"), "configuration source kind"),
+        path=_string(value.get("path"), "configuration source path"),
+        repository_id=_optional_string(
+            value.get("repository_id"), "source repository identifier"
+        ),
+        order=_nonnegative_int(value.get("order", 0), "configuration source order"),
+        revision=_nonnegative_int(
+            value.get("revision", 0), "configuration source revision"
+        ),
+    )
+
+
+def _space_pack_attachment(value: dict[str, Any]) -> SpacePackAttachmentRecord:
+    _require_keys(value, {"space_id", "extension_id", "pack_id", "order"})
+    return SpacePackAttachmentRecord(
+        space_id=_string(value.get("space_id"), "attachment space identifier"),
+        extension_id=_string(
+            value.get("extension_id"), "attachment extension identifier"
+        ),
+        pack_id=_string(value.get("pack_id"), "attachment pack identifier"),
+        order=_nonnegative_int(value.get("order", 0), "attachment order"),
     )
 
 
