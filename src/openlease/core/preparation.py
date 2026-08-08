@@ -51,7 +51,8 @@ class RollbackPlan:
 def plan_preparation(
     members: tuple[PreparationMember, ...],
     successor_name: str,
-    worktree_base: Path,
+    worktree_base: Path | None,
+    occupied_paths: frozenset[Path] = frozenset(),
 ) -> PreparationPlan:
     by_repository: dict[str, PreparationMember] = {}
     for member in members:
@@ -59,19 +60,29 @@ def plan_preparation(
         if prior is not None and prior != member:
             raise ValueError(f"inconsistent preparation member: {member.repository_id}")
         by_repository[member.repository_id] = member
-    generated = tuple(
-        GeneratedWorktree(
-            member.repository_id,
-            member.source_path,
-            worktree_base / f"{member.repository_id}-{successor_name}",
-            successor_name,
-            member.head,
+    occupied = {path.resolve() for path in occupied_paths}
+    generated: list[GeneratedWorktree] = []
+    for member in sorted(by_repository.values(), key=lambda item: item.repository_id):
+        if not member.affected:
+            continue
+        base = worktree_base or member.source_path.parent
+        suffix = 1
+        destination = (base / f"{member.source_path.name}-olease-{suffix}").resolve()
+        while destination in occupied:
+            suffix += 1
+            destination = (
+                base / f"{member.source_path.name}-olease-{suffix}"
+            ).resolve()
+        occupied.add(destination)
+        generated.append(
+            GeneratedWorktree(
+                member.repository_id,
+                member.source_path,
+                destination,
+                successor_name,
+                member.head,
+            )
         )
-        for member in sorted(
-            by_repository.values(), key=lambda item: item.repository_id
-        )
-        if member.affected
-    )
     pinned = tuple(
         member
         for member in sorted(
@@ -79,7 +90,7 @@ def plan_preparation(
         )
         if not member.affected
     )
-    return PreparationPlan(generated, pinned)
+    return PreparationPlan(tuple(generated), pinned)
 
 
 def plan_rollback(

@@ -9,6 +9,20 @@ from openlease.utils.git_adapter import (
     MergeLeg,
     WorktreeRequest,
 )
+from openlease.utils.processes import ProcessAdapterError, ProcessResult
+
+
+class FakeRunner:
+    def __init__(self, output: str, returncode: int = 0, stderr: str = "") -> None:
+        self.output = output
+        self.returncode = returncode
+        self.stderr = stderr
+        self.calls: list[tuple[str, ...]] = []
+
+    def run(self, arguments, *, cwd=None, env=None):
+        del cwd, env
+        self.calls.append(arguments)
+        return ProcessResult(arguments, self.returncode, self.output, self.stderr)
 
 
 def _git(repo: Path, *arguments: str) -> str:
@@ -29,6 +43,41 @@ def _repository(path: Path) -> Path:
     _git(path, "config", "user.name", "OpenLease Tests")
     _git(path, "commit", "--allow-empty", "--quiet", "-m", "base")
     return path
+
+
+def test_lists_registered_worktree_paths_from_porcelain(tmp_path: Path) -> None:
+    checkout = tmp_path / "repository"
+    first = tmp_path / "repo one"
+    second = tmp_path / "unicode-仓库"
+    runner = FakeRunner(
+        f"worktree {first}\0HEAD {'a' * 40}\0branch refs/heads/main\0\0"
+        f"worktree {second}\0HEAD {'b' * 40}\0detached\0\0"
+    )
+
+    paths = GitAdapter(runner).worktree_paths(checkout)
+
+    assert paths == (first.resolve(), second.resolve())
+    assert runner.calls == [
+        ("git", "-C", str(checkout), "worktree", "list", "--porcelain", "-z")
+    ]
+
+
+def test_returns_no_registered_worktree_paths_for_empty_output(
+    tmp_path: Path,
+) -> None:
+    assert GitAdapter(FakeRunner("")).worktree_paths(tmp_path) == ()
+
+
+def test_rejects_a_worktree_record_without_a_path(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="invalid"):
+        GitAdapter(FakeRunner("worktree \0HEAD deadbeef\0")).worktree_paths(tmp_path)
+
+
+def test_reports_worktree_listing_command_failure(tmp_path: Path) -> None:
+    with pytest.raises(ProcessAdapterError, match="listing failed: unavailable"):
+        GitAdapter(FakeRunner("", returncode=1, stderr="unavailable")).worktree_paths(
+            tmp_path
+        )
 
 
 def test_inspects_checkout_identity_head_and_dirty_state(tmp_path: Path) -> None:

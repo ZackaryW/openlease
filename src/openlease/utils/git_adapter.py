@@ -147,6 +147,21 @@ class GitAdapter:
         )
         return self.inspect(request.destination)
 
+    def worktree_paths(self, checkout: Path) -> tuple[Path, ...]:
+        result = require_success(
+            self._git(checkout, "worktree", "list", "--porcelain", "-z"),
+            "Git worktree listing",
+        )
+        paths: list[Path] = []
+        for field in result.stdout.split("\0"):
+            if not field.startswith("worktree "):
+                continue
+            value = field.removeprefix("worktree ")
+            if not value:
+                raise ValueError("Git worktree output is invalid")
+            paths.append(Path(value).resolve())
+        return tuple(paths)
+
     def remove_worktree(self, source: GitCheckout, path: Path) -> None:
         require_success(
             self._git(source.root, "worktree", "remove", str(path)),
