@@ -85,19 +85,23 @@ def _run(context: Context, operation: Callable[[], CommandResult]) -> None:
     try:
         result = operation()
     except OpenLeaseError as error:
-        envelope = {
-            "ok": False,
-            "operation": "error",
-            "outcome": error.outcome,
-            "message": str(error),
-            "details": json_value(error.details),
-        }
-        typer.echo(json.dumps(envelope, sort_keys=True), err=True)
-        raise typer.Exit(error.exit_status) from None
+        _exit_for_error(error)
     if context.json_output:
         typer.echo(json.dumps(result.envelope(), sort_keys=True))
     else:
         typer.echo(f"{result.operation}: {result.outcome}")
+
+
+def _exit_for_error(error: OpenLeaseError) -> None:
+    envelope = {
+        "ok": False,
+        "operation": "error",
+        "outcome": error.outcome,
+        "message": str(error),
+        "details": json_value(error.details),
+    }
+    typer.echo(json.dumps(envelope, sort_keys=True), err=True)
+    raise typer.Exit(error.exit_status) from None
 
 
 @register_app.command("repository")
@@ -158,7 +162,14 @@ def session_start(ctx: typer.Context, identifier: str) -> None:
 @session_app.command("attach")
 def session_attach(ctx: typer.Context, identifier: str) -> None:
     context = _context(ctx)
-    _run(context, lambda: context.lifecycle.select_space(identifier))
+    if context.json_output:
+        _run(context, lambda: context.lifecycle.select_space(identifier))
+        return
+    try:
+        context.lifecycle.select_space(identifier)
+    except OpenLeaseError as error:
+        _exit_for_error(error)
+    typer.echo(f"OPENLEASE_SPACE={identifier}")
 
 
 @session_app.command("close")

@@ -64,3 +64,20 @@ def test_domain_failure_uses_stable_status_without_traceback(tmp_path: Path) -> 
     assert failed.exit_code == 2
     assert "Traceback" not in failed.stderr
     assert json.loads(failed.stderr)["outcome"] == "invalid_request"
+
+
+def test_session_attach_prints_the_parent_shell_selection(tmp_path: Path) -> None:
+    runner = CliRunner()
+    state_root = tmp_path / "state"
+    runner.invoke(
+        app,
+        ["--state-root", str(state_root), "session", "start", "example"],
+    )
+
+    attached = runner.invoke(
+        app,
+        ["--state-root", str(state_root), "session", "attach", "example"],
+    )
+
+    assert attached.exit_code == 0
+    assert attached.stdout == "OPENLEASE_SPACE=example\n"
