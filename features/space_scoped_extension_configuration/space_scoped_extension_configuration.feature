@@ -21,10 +21,10 @@ Feature: Resolve extension configuration from an OpenLease space
       | an unsupported contract version   |
 
   Scenario: Resolve nested authority configuration without sibling leakage
-    Given repo 1 has machine configuration, two ordered space packs, repository configuration, root authority configuration, and distinct child A and child B configuration
+    Given repo 1 has machine configuration, two ordered packs, direct space configuration, repository configuration, root authority configuration, and distinct child A and child B configuration
     And one space targets child A
     When the host requests child A context for its extension
-    Then the documents are ordered from machine through both packs, repository, root, and child A scopes
+    Then the documents are ordered from machine through both packs, direct space, repository, root, and child A scopes
     And child B configuration is excluded
     And OpenLease preserves each opaque document for extension-owned interpretation
 
