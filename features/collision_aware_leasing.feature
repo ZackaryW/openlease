@@ -1,0 +1,71 @@
+Feature: Lease affected OpenSpec authorities without false collisions
+  OpenLease users can serialize overlapping specification work while compatible
+  child authorities and read-only context remain concurrently usable.
+
+  Scenario: Require explicit topology and an affected claim
+    Given a space has associated repositories but no complete explicit authority graph or affected claim
+    When the owner runs lockable or lock
+    Then OpenLease rejects acquisition without inferring or persisting relationships
+    And no lease or projection changes
+
+  Scenario: Expand an affected external authority
+    Given repo 2 is affected
+    And repo 2 has an explicit writable dependency on the authority hosted by repo 3
+    When OpenLease plans the affected closure
+    Then the closure includes the repo 3 hosted authority
+    And excludes unrelated associated repositories
+
+  Scenario: Share read-only context
+    Given two spaces associate the same authority only as read-only context
+    When both spaces acquire their affected writable closures
+    Then neither acquires the shared read-only authority
+    And the read-only overlap does not conflict
+
+  Scenario: Lease sibling authorities concurrently in one monorepo checkout
+    Given the repo 1 root authority is unleased
+    And one space affects child A
+    And another space affects child B
+    When both spaces atomically acquire their closures
+    Then both acquisitions succeed
+    And neither space holds the root or its sibling authority
+    And physical checkout overlap alone is not reported as a conflict
+
+  Scenario: Reject a parent and child overlap
+    Given one space holds the repo 1 root authority
+    When another space requests child A
+    Then lockable returns false
+    And reports the held root, requested child, hierarchical conflict, and owning space
+
+  Scenario: Report the complete intersection of partially overlapping claims
+    Given one active space holds child A and the shared repo 3 authority
+    And another affected closure contains child B and the same repo 3 authority
+    When the second space runs lockable
+    Then child B is reported as compatible
+    And the shared repo 3 authority is reported as the conflict
+    And no part of the second closure is leased
+
+  Scenario: Competing processes acquire one closure exactly once
+    Given two processes request closures containing the same logical authority
+    When they attempt lock concurrently
+    Then exactly one complete closure becomes locked
+    And the other request receives the winning owner and complete conflict set
+    And no partial losing lease remains
+
+  Scenario: Worktree substitution does not bypass an authority conflict
+    Given another space holds an affected logical authority
+    When the requesting space substitutes a different worktree of the same repository
+    Then lockable remains false for the same authority
+
+  Scenario: Repeat a compatible lock as a no-op
+    Given a selected space already holds the exact accepted affected closure
+    When the owner repeats lock
+    Then OpenLease returns the existing structured result
+    And does not replace identity, starting commits, leases, or projection
+
+  Scenario: Detect an affected-authority boundary violation
+    Given a space holds only child A
+    And its branch changes an OpenSpec file under child B
+    When the owner releases or reconciles the space
+    Then OpenLease reports the child B path outside the held boundary
+    And does not represent the cohort as collision-safe
+
