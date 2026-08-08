@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from base64 import b64encode
 from dataclasses import asdict, dataclass, is_dataclass
 from enum import Enum
 from pathlib import Path
@@ -13,6 +14,8 @@ def json_value(value: object) -> Any:
         return value.value
     if isinstance(value, Path):
         return str(value)
+    if isinstance(value, bytes):
+        return {"encoding": "base64", "value": b64encode(value).decode("ascii")}
     if isinstance(value, dict):
         return {str(key): json_value(item) for key, item in value.items()}
     if isinstance(value, (tuple, list, set)):

@@ -88,6 +88,28 @@ commands:
           - src/openlease/result.py
           - src/openlease/core/state_codec.py
           - src/openlease/utils/state_repository.py
+      space-scoped-extension-configuration:
+        value: features/space_scoped_extension_configuration
+        paths:
+          - features/space_scoped_extension_configuration/**
+          - features/support/**
+          - features/__init__.py
+          - scripts/run_behave_roots.py
+          - behave.ini
+          - pyproject.toml
+          - uv.lock
+          - zpp.behave.yaml
+          - src/openlease/__init__.py
+          - src/openlease/errors.py
+          - src/openlease/extension.py
+          - src/openlease/lifecycle.py
+          - src/openlease/result.py
+          - src/openlease/core/configuration.py
+          - src/openlease/core/graph.py
+          - src/openlease/core/state_codec.py
+          - src/openlease/utils/configuration_source.py
+          - src/openlease/utils/git_adapter.py
+          - src/openlease/utils/state_repository.py
   bdd-audit:
     provider:
       kind: argv
@@ -104,4 +126,7 @@ commands:
         paths: ["**"]
       programmatic-command-surface:
         value: features/programmatic_command_surface
+        paths: ["**"]
+      space-scoped-extension-configuration:
+        value: features/space_scoped_extension_configuration
         paths: ["**"]

@@ -96,6 +96,67 @@ Use `openlease COMMAND --help` for the complete command arguments. Every command
 delegates to the public `OpenLease` Python lifecycle and `--json` emits one stable
 result envelope.
 
+## Extension configuration
+
+Dependent products can explicitly register a versioned extension and delegate
+their generic configuration plumbing to OpenLease. OpenLease resolves machine,
+ordered reusable-pack, direct-space, repository, and root-to-child OpenSpec
+authority documents. It returns opaque content with source provenance, digests,
+observed generations, effective worktree paths, and separately namespaced
+configuration/data/cache roots; the extension still owns its schema and meaning.
+
+```python
+from pathlib import Path
+
+from openlease import (
+    ConfigurationTarget,
+    ExtensionManifest,
+    ExtensionRegistration,
+    OpenLease,
+)
+
+zpp_root = Path.home() / ".zpp"
+system = OpenLease(
+    zpp_root / "openlease",
+    extensions=(ExtensionRegistration(ExtensionManifest("zpp.traits")),),
+)
+system.set_extension_roots("zpp.traits", product_root=zpp_root)
+result = system.resolve_extension_context(
+    "zpp.traits",
+    "current-work",
+    ConfigurationTarget.authority("package-a"),
+)
+```
+
+This lets rebuilt ZPP retain `.zpp` as its product root without independently
+resolving homes, repositories, saved profiles, or generated worktrees. A reusable
+OpenLease configuration pack can replace a profile; direct space configuration
+then specializes those pack defaults. Configuration scopes are not child spaces
+and never acquire leases.
+
+The optional CLI exposes the same generic operations:
+
+```console
+openlease extension roots-set zpp.traits --product-root ~/.zpp
+openlease config bind zpp.traits machine ~/.zpp/traits.md --scope machine
+openlease pack define zpp.traits backend
+openlease --space current-work pack attach zpp.traits backend --order 1
+openlease --space current-work --json extension context zpp.traits --authority package-a
+```
+
+Every context request reads the currently bound documents. An edit is visible on
+the next request even while the space is locked; a missing source fails instead
+of returning stale cached content, without changing lease or graph generations.
+Repository-contained bindings follow the same relative path into a generated
+worktree, while external bindings retain their exact canonical machine path.
+Dependency edges are reported but never import provider configuration implicitly.
+
+Configuration state uses schema version 2. A version-1 index is accepted as an
+empty configuration model, and its exact bytes are preserved once as
+`state.v1.json` before the first upgraded write. Restoring that file for an older
+binary discards state changes made after migration; OpenLease does not claim
+bidirectional version-1/version-2 compatibility.
+
 ## Safety boundary
 
 OpenLease serializes cooperative machine-local OpenSpec authority work. It audits

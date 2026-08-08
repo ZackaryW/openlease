@@ -5,6 +5,18 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Literal
 
+from openlease.core.configuration import (
+    ConfigurationError,
+    ConfigurationTarget,
+    ExtensionRootPolicy,
+    RepositoryLocation,
+    SourceKind,
+    plan_configuration_sources,
+    resolve_extension_roots,
+)
+from openlease.core.configuration import (
+    bind_configuration_source as bind_source_path,
+)
 from openlease.core.graph import (
     AccessRole,
     AffectedClaim,
@@ -27,7 +39,10 @@ from openlease.core.reconciliation import (
 )
 from openlease.core.state_codec import (
     AuthorityRecord,
+    ConfigurationPackRecord,
+    ConfigurationSourceRecord,
     DependencyRecord,
+    ExtensionRootPolicyRecord,
     LeaseRecord,
     OpenLeaseState,
     ParentRecord,
@@ -35,6 +50,7 @@ from openlease.core.state_codec import (
     ReconciliationRecord,
     RepositoryRecord,
     SpaceMemberRecord,
+    SpacePackAttachmentRecord,
     SpaceRecord,
 )
 from openlease.errors import (
@@ -43,7 +59,20 @@ from openlease.errors import (
     OwnershipConflict,
     PreparationFailed,
 )
+from openlease.extension import (
+    EXTENSION_CONTRACT_VERSION,
+    ExtensionAuthority,
+    ExtensionContext,
+    ExtensionMember,
+    ExtensionRegistration,
+    ExtensionRelationship,
+    ExtensionResolution,
+)
 from openlease.result import CommandResult
+from openlease.utils.configuration_source import (
+    ConfigurationDocument,
+    ConfigurationSourceReader,
+)
 from openlease.utils.git_adapter import (
     GitAdapter,
     IntegrationStrategy,
@@ -85,6 +114,8 @@ class OpenLease:
         git: GitAdapter | None = None,
         openspec: OpenSpecAdapter | None = None,
         verifier: Callable[[str, tuple[Path, ...]], None] | None = None,
+        extensions: tuple[ExtensionRegistration, ...] = (),
+        configuration_reader: ConfigurationSourceReader | None = None,
     ) -> None:
         self.state_root = state_root.resolve()
         self.worktree_base = (
@@ -94,6 +125,12 @@ class OpenLease:
         self.git = git or GitAdapter()
         self.openspec = openspec or OpenSpecAdapter()
         self.verifier = verifier or self._verify_clean_checkouts
+        self._extensions = self._validate_extensions(extensions)
+        self.configuration_reader = configuration_reader or ConfigurationSourceReader()
+
+    @property
+    def registered_extensions(self) -> tuple[str, ...]:
+        return tuple(self._extensions)
 
     def snapshot(self) -> OpenLeaseState:
         return self.repository.load()
@@ -215,6 +252,329 @@ class OpenLease:
 
         updated = self._mutate(transform)
         return CommandResult("create_space", data=self._space(updated, identifier))
+
+    def set_extension_roots(
+        self,
+        extension_id: str,
+        *,
+        product_root: Path | None = None,
+        configuration_root: Path | None = None,
+        data_root: Path | None = None,
+        cache_root: Path | None = None,
+    ) -> CommandResult:
+        self._extension(extension_id)
+        record = ExtensionRootPolicyRecord(
+            extension_id,
+            str(product_root.resolve()) if product_root is not None else None,
+            (
+                str(configuration_root.resolve())
+                if configuration_root is not None
+                else None
+            ),
+            str(data_root.resolve()) if data_root is not None else None,
+            str(cache_root.resolve()) if cache_root is not None else None,
+        )
+
+        def transform(state: OpenLeaseState) -> OpenLeaseState:
+            existing = next(
+                (
+                    item
+                    for item in state.extension_roots
+                    if item.extension_id == extension_id
+                ),
+                None,
+            )
+            if existing == record:
+                return state
+            roots = (
+                *(
+                    item
+                    for item in state.extension_roots
+                    if item.extension_id != extension_id
+                ),
+                record,
+            )
+            return replace(
+                state,
+                extension_roots=roots,
+                configuration_generation=state.configuration_generation + 1,
+            )
+
+        before = self.snapshot()
+        updated = self._mutate(transform)
+        return CommandResult(
+            "set_extension_roots",
+            changed=updated.configuration_generation != before.configuration_generation,
+            data=self._resolved_extension_roots(updated, extension_id),
+        )
+
+    def extension_roots(self, extension_id: str) -> CommandResult:
+        self._extension(extension_id)
+        state = self.snapshot()
+        return CommandResult(
+            "extension_roots",
+            changed=False,
+            data=self._resolved_extension_roots(state, extension_id),
+        )
+
+    def define_configuration_pack(
+        self, extension_id: str, identifier: str
+    ) -> CommandResult:
+        self._extension(extension_id)
+        record = ConfigurationPackRecord(identifier, extension_id)
+
+        def transform(state: OpenLeaseState) -> OpenLeaseState:
+            if record in state.configuration_packs:
+                return state
+            return replace(
+                state,
+                configuration_packs=(*state.configuration_packs, record),
+                configuration_generation=state.configuration_generation + 1,
+            )
+
+        before = self.snapshot()
+        updated = self._mutate(transform)
+        return CommandResult(
+            "define_configuration_pack",
+            changed=updated.configuration_generation != before.configuration_generation,
+            data=record,
+        )
+
+    def attach_configuration_pack(
+        self,
+        space_id: str,
+        extension_id: str,
+        pack_id: str,
+        *,
+        order: int = 0,
+    ) -> CommandResult:
+        self._extension(extension_id)
+        if order < 0:
+            raise InvalidRequest("configuration pack order must be nonnegative")
+        record = SpacePackAttachmentRecord(space_id, extension_id, pack_id, order)
+
+        def transform(state: OpenLeaseState) -> OpenLeaseState:
+            self._space(state, space_id)
+            if not any(
+                item.identifier == pack_id and item.extension_id == extension_id
+                for item in state.configuration_packs
+            ):
+                raise InvalidRequest(f"configuration pack not found: {pack_id}")
+            existing = next(
+                (
+                    item
+                    for item in state.space_pack_attachments
+                    if item.space_id == space_id
+                    and item.extension_id == extension_id
+                    and item.pack_id == pack_id
+                ),
+                None,
+            )
+            if existing == record:
+                return state
+            attachments = (
+                *(
+                    item
+                    for item in state.space_pack_attachments
+                    if not (
+                        item.space_id == space_id
+                        and item.extension_id == extension_id
+                        and item.pack_id == pack_id
+                    )
+                ),
+                record,
+            )
+            return replace(
+                state,
+                space_pack_attachments=attachments,
+                configuration_generation=state.configuration_generation + 1,
+            )
+
+        self._mutate(transform)
+        return CommandResult("attach_configuration_pack", data=record)
+
+    def detach_configuration_pack(
+        self, space_id: str, extension_id: str, pack_id: str
+    ) -> CommandResult:
+        self._extension(extension_id)
+
+        def transform(state: OpenLeaseState) -> OpenLeaseState:
+            self._space(state, space_id)
+            attachments = tuple(
+                item
+                for item in state.space_pack_attachments
+                if not (
+                    item.space_id == space_id
+                    and item.extension_id == extension_id
+                    and item.pack_id == pack_id
+                )
+            )
+            if attachments == state.space_pack_attachments:
+                return state
+            return replace(
+                state,
+                space_pack_attachments=attachments,
+                configuration_generation=state.configuration_generation + 1,
+            )
+
+        before = self.snapshot()
+        updated = self._mutate(transform)
+        return CommandResult(
+            "detach_configuration_pack",
+            changed=updated.configuration_generation != before.configuration_generation,
+            data={"space": space_id, "extension": extension_id, "pack": pack_id},
+        )
+
+    def bind_configuration_source(
+        self,
+        extension_id: str,
+        identifier: str,
+        source: Path,
+        scope_kind: str,
+        scope_id: str | None = None,
+        *,
+        order: int = 0,
+    ) -> CommandResult:
+        self._extension(extension_id)
+        if order < 0:
+            raise InvalidRequest("configuration source order must be nonnegative")
+        observed = self.snapshot()
+        try:
+            bound = bind_source_path(
+                source,
+                tuple(
+                    RepositoryLocation(item.identifier, Path(item.path))
+                    for item in observed.repositories
+                ),
+            )
+        except ConfigurationError as error:
+            raise InvalidRequest(str(error)) from error
+
+        def transform(state: OpenLeaseState) -> OpenLeaseState:
+            existing = next(
+                (
+                    item
+                    for item in state.configuration_sources
+                    if item.extension_id == extension_id
+                    and item.identifier == identifier
+                ),
+                None,
+            )
+            revision = 0 if existing is None else existing.revision + 1
+            record = ConfigurationSourceRecord(
+                identifier=identifier,
+                extension_id=extension_id,
+                scope_kind=scope_kind,
+                scope_id=scope_id,
+                source_kind=bound.kind.value,
+                path=(
+                    bound.path.as_posix()
+                    if bound.kind is SourceKind.REPOSITORY
+                    else str(bound.path)
+                ),
+                repository_id=bound.repository_id,
+                order=order,
+                revision=revision,
+            )
+            if (
+                existing is not None
+                and replace(record, revision=existing.revision) == existing
+            ):
+                return state
+            sources = (
+                *(
+                    item
+                    for item in state.configuration_sources
+                    if not (
+                        item.extension_id == extension_id
+                        and item.identifier == identifier
+                    )
+                ),
+                record,
+            )
+            return replace(
+                state,
+                configuration_sources=sources,
+                configuration_generation=state.configuration_generation + 1,
+            )
+
+        updated = self._mutate(transform, expected_generation=observed.generation)
+        record = next(
+            item
+            for item in updated.configuration_sources
+            if item.extension_id == extension_id and item.identifier == identifier
+        )
+        return CommandResult("bind_configuration_source", data=record)
+
+    def remove_configuration_source(
+        self, extension_id: str, identifier: str
+    ) -> CommandResult:
+        self._extension(extension_id)
+
+        def transform(state: OpenLeaseState) -> OpenLeaseState:
+            sources = tuple(
+                item
+                for item in state.configuration_sources
+                if not (
+                    item.extension_id == extension_id and item.identifier == identifier
+                )
+            )
+            if sources == state.configuration_sources:
+                return state
+            return replace(
+                state,
+                configuration_sources=sources,
+                configuration_generation=state.configuration_generation + 1,
+            )
+
+        before = self.snapshot()
+        updated = self._mutate(transform)
+        return CommandResult(
+            "remove_configuration_source",
+            changed=updated.configuration_generation != before.configuration_generation,
+            data={"extension": extension_id, "source": identifier},
+        )
+
+    def resolve_extension_context(
+        self,
+        extension_id: str,
+        space_id: str,
+        target: ConfigurationTarget,
+    ) -> CommandResult:
+        registration = self._extension(extension_id)
+        for _attempt in range(4):
+            state = self.snapshot()
+            try:
+                planned = plan_configuration_sources(
+                    state, extension_id, space_id, target
+                )
+                documents = tuple(
+                    self.configuration_reader.read(item) for item in planned
+                )
+                context = self._extension_context(
+                    state, extension_id, space_id, target, documents
+                )
+            except (ConfigurationError, StopIteration) as error:
+                raise InvalidRequest(str(error)) from error
+            if self.snapshot().generation != state.generation:
+                continue
+            try:
+                value = (
+                    registration.resolver(context)
+                    if registration.resolver is not None
+                    else None
+                )
+            except Exception as error:
+                raise InvalidRequest(
+                    f"extension resolution failed: {extension_id}",
+                    details={"error": str(error)},
+                ) from error
+            return CommandResult(
+                "resolve_extension_context",
+                changed=False,
+                data=ExtensionResolution(context, value),
+            )
+        raise InvalidRequest("state changed repeatedly during extension resolution")
 
     def select_space(self, identifier: str) -> CommandResult:
         state = self.snapshot()
@@ -1394,6 +1754,169 @@ class OpenLease:
         if space.status != "draft":
             raise InvalidRequest("locked or prepared space shape is immutable")
         return space
+
+    @staticmethod
+    def _validate_extensions(
+        registrations: tuple[ExtensionRegistration, ...],
+    ) -> dict[str, ExtensionRegistration]:
+        results: dict[str, ExtensionRegistration] = {}
+        for registration in registrations:
+            manifest = registration.manifest
+            if (
+                not manifest.identifier
+                or manifest.identifier in {".", ".."}
+                or any(separator in manifest.identifier for separator in ("/", "\\"))
+            ):
+                raise InvalidRequest("invalid extension identifier")
+            if manifest.contract_version != EXTENSION_CONTRACT_VERSION:
+                raise InvalidRequest(
+                    "unsupported extension contract version",
+                    details={
+                        "extension": manifest.identifier,
+                        "version": manifest.contract_version,
+                    },
+                )
+            if manifest.identifier in results:
+                raise InvalidRequest(
+                    f"duplicate extension identity: {manifest.identifier}"
+                )
+            results[manifest.identifier] = registration
+        return results
+
+    def _extension(self, identifier: str) -> ExtensionRegistration:
+        result = self._extensions.get(identifier)
+        if result is None:
+            raise InvalidRequest(f"extension not registered: {identifier}")
+        return result
+
+    def _resolved_extension_roots(self, state: OpenLeaseState, extension_id: str):
+        record = next(
+            (
+                item
+                for item in state.extension_roots
+                if item.extension_id == extension_id
+            ),
+            None,
+        )
+        policy = ExtensionRootPolicy(
+            product_root=(
+                Path(record.product_root)
+                if record is not None and record.product_root is not None
+                else None
+            ),
+            configuration_root=(
+                Path(record.configuration_root)
+                if record is not None and record.configuration_root is not None
+                else None
+            ),
+            data_root=(
+                Path(record.data_root)
+                if record is not None and record.data_root is not None
+                else None
+            ),
+            cache_root=(
+                Path(record.cache_root)
+                if record is not None and record.cache_root is not None
+                else None
+            ),
+        )
+        try:
+            return resolve_extension_roots(self.state_root, extension_id, policy)
+        except ConfigurationError as error:
+            raise InvalidRequest(str(error)) from error
+
+    def _extension_context(
+        self,
+        state: OpenLeaseState,
+        extension_id: str,
+        space_id: str,
+        target: ConfigurationTarget,
+        documents: tuple[ConfigurationDocument, ...],
+    ) -> ExtensionContext:
+        space = self._space(state, space_id)
+        member_records = {item.repository_id: item for item in space.members}
+        authority_repositories = {
+            item.repository_id
+            for item in state.authorities
+            if item.identifier
+            in set(space.affected_authority_ids) | set(space.held_authority_ids)
+        }
+        writable_repositories = (
+            set(space.affected_repository_ids) | authority_repositories
+        )
+        repositories = {item.identifier: item for item in state.repositories}
+        members: list[ExtensionMember] = []
+        effective_roots: dict[str, Path] = {}
+        for repository_id in space.associated_repository_ids:
+            recorded = member_records.get(repository_id)
+            if recorded is None:
+                checkout = self.git.inspect(Path(repositories[repository_id].path))
+                source_path = checkout.root
+                effective_path = checkout.root
+                starting_commit = checkout.head
+                branch = checkout.branch
+                generated = False
+            else:
+                source_path = Path(recorded.source_path).resolve()
+                effective_path = Path(recorded.effective_path).resolve()
+                starting_commit = recorded.starting_commit
+                branch = recorded.branch
+                generated = recorded.generated
+            effective_roots[repository_id] = effective_path
+            members.append(
+                ExtensionMember(
+                    repository_id=repository_id,
+                    source_path=source_path,
+                    effective_path=effective_path,
+                    starting_commit=starting_commit,
+                    branch=branch,
+                    generated=generated,
+                    access_role=(
+                        "writable"
+                        if repository_id in writable_repositories
+                        else "read_only"
+                    ),
+                )
+            )
+        authorities = tuple(
+            ExtensionAuthority(
+                identifier=item.identifier,
+                repository_id=item.repository_id,
+                relative_path=item.relative_path,
+                effective_path=(
+                    effective_roots[item.repository_id] / item.relative_path
+                ).resolve(),
+                access_role=(
+                    "writable"
+                    if item.repository_id in writable_repositories
+                    or item.identifier in space.held_authority_ids
+                    else "read_only"
+                ),
+            )
+            for item in state.authorities
+            if item.repository_id in effective_roots
+        )
+        relationships = tuple(
+            ExtensionRelationship("parent", item.child_id, item.parent_id)
+            for item in state.parents
+        ) + tuple(
+            ExtensionRelationship(
+                "dependency", item.consumer_id, item.authority_id, item.access
+            )
+            for item in state.dependencies
+        )
+        return ExtensionContext(
+            extension_id=extension_id,
+            space_id=space_id,
+            target=target,
+            state_generation=state.generation,
+            configuration_generation=state.configuration_generation,
+            members=tuple(members),
+            authorities=authorities,
+            relationships=relationships,
+            documents=documents,
+            roots=self._resolved_extension_roots(state, extension_id),
+        )
 
     def _repository(
         self, state: OpenLeaseState, identifier: str, *, required: bool = True

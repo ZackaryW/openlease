@@ -9,7 +9,16 @@ from typing import Annotated
 
 import typer
 
-from openlease import BranchSelection, OpenLease, OpenLeaseError, ReconcileSelection
+from openlease import (
+    BranchSelection,
+    ConfigurationTarget,
+    ExtensionManifest,
+    ExtensionRegistration,
+    InvalidRequest,
+    OpenLease,
+    OpenLeaseError,
+    ReconcileSelection,
+)
 from openlease.core.graph import AccessRole
 from openlease.result import CommandResult, json_value
 from openlease.utils.git_adapter import IntegrationStrategy
@@ -22,6 +31,9 @@ affect_app = typer.Typer(help="Manage a space's direct affected claim.")
 reconcile_app = typer.Typer(help="Plan and apply explicit integration paths.")
 session_app = typer.Typer(help="Select a durable space in terminal context.")
 preparation_app = typer.Typer(help="Inspect and recover failed successor preparation.")
+extension_app = typer.Typer(help="Inspect extension contexts and storage roots.")
+configuration_app = typer.Typer(help="Manage extension configuration sources.")
+pack_app = typer.Typer(help="Manage reusable extension configuration packs.")
 app.add_typer(register_app, name="register")
 app.add_typer(relate_app, name="relate")
 app.add_typer(space_app, name="space")
@@ -29,6 +41,9 @@ app.add_typer(affect_app, name="affect")
 app.add_typer(reconcile_app, name="reconcile")
 app.add_typer(session_app, name="session")
 app.add_typer(preparation_app, name="preparation")
+app.add_typer(extension_app, name="extension")
+app.add_typer(configuration_app, name="config")
+app.add_typer(pack_app, name="pack")
 
 
 @dataclass(slots=True)
@@ -103,6 +118,155 @@ def _exit_for_error(error: OpenLeaseError) -> None:
     }
     typer.echo(json.dumps(envelope, sort_keys=True), err=True)
     raise typer.Exit(error.exit_status) from None
+
+
+def _extension_lifecycle(context: Context, extension_id: str) -> OpenLease:
+    lifecycle = context.lifecycle
+    return OpenLease(
+        lifecycle.state_root,
+        worktree_base=lifecycle.worktree_base,
+        git=lifecycle.git,
+        openspec=lifecycle.openspec,
+        extensions=(ExtensionRegistration(ExtensionManifest(extension_id)),),
+    )
+
+
+@extension_app.command("roots-set")
+def extension_roots_set(
+    ctx: typer.Context,
+    extension: str,
+    product_root: Annotated[Path | None, typer.Option("--product-root")] = None,
+    configuration_root: Annotated[
+        Path | None, typer.Option("--configuration-root")
+    ] = None,
+    data_root: Annotated[Path | None, typer.Option("--data-root")] = None,
+    cache_root: Annotated[Path | None, typer.Option("--cache-root")] = None,
+) -> None:
+    context = _context(ctx)
+    lifecycle = _extension_lifecycle(context, extension)
+    _run(
+        context,
+        lambda: lifecycle.set_extension_roots(
+            extension,
+            product_root=product_root,
+            configuration_root=configuration_root,
+            data_root=data_root,
+            cache_root=cache_root,
+        ),
+    )
+
+
+@extension_app.command("roots-show")
+def extension_roots_show(ctx: typer.Context, extension: str) -> None:
+    context = _context(ctx)
+    lifecycle = _extension_lifecycle(context, extension)
+    _run(context, lambda: lifecycle.extension_roots(extension))
+
+
+@extension_app.command("context")
+def extension_context(
+    ctx: typer.Context,
+    extension: str,
+    repository: Annotated[str | None, typer.Option("--repository")] = None,
+    authority: Annotated[str | None, typer.Option("--authority")] = None,
+    space: Annotated[str | None, typer.Option("--space")] = None,
+) -> None:
+    context = _context(ctx)
+    lifecycle = _extension_lifecycle(context, extension)
+
+    def resolve() -> CommandResult:
+        if (repository is None) == (authority is None):
+            raise InvalidRequest("select exactly one repository or authority target")
+        target = (
+            ConfigurationTarget.repository(repository)
+            if repository is not None
+            else ConfigurationTarget.authority(authority or "")
+        )
+        return lifecycle.resolve_extension_context(
+            extension, _space(context, space), target
+        )
+
+    _run(context, resolve)
+
+
+@configuration_app.command("bind")
+def configuration_bind(
+    ctx: typer.Context,
+    extension: str,
+    identifier: str,
+    source: Path,
+    scope: Annotated[str, typer.Option("--scope")],
+    scope_id: Annotated[str | None, typer.Option("--scope-id")] = None,
+    order: Annotated[int, typer.Option("--order")] = 0,
+) -> None:
+    context = _context(ctx)
+    lifecycle = _extension_lifecycle(context, extension)
+    _run(
+        context,
+        lambda: lifecycle.bind_configuration_source(
+            extension,
+            identifier,
+            source,
+            scope,
+            scope_id,
+            order=order,
+        ),
+    )
+
+
+@configuration_app.command("remove")
+def configuration_remove(ctx: typer.Context, extension: str, identifier: str) -> None:
+    context = _context(ctx)
+    lifecycle = _extension_lifecycle(context, extension)
+    _run(
+        context,
+        lambda: lifecycle.remove_configuration_source(extension, identifier),
+    )
+
+
+@pack_app.command("define")
+def pack_define(ctx: typer.Context, extension: str, identifier: str) -> None:
+    context = _context(ctx)
+    lifecycle = _extension_lifecycle(context, extension)
+    _run(
+        context,
+        lambda: lifecycle.define_configuration_pack(extension, identifier),
+    )
+
+
+@pack_app.command("attach")
+def pack_attach(
+    ctx: typer.Context,
+    extension: str,
+    identifier: str,
+    order: Annotated[int, typer.Option("--order")] = 0,
+    space: Annotated[str | None, typer.Option("--space")] = None,
+) -> None:
+    context = _context(ctx)
+    lifecycle = _extension_lifecycle(context, extension)
+    _run(
+        context,
+        lambda: lifecycle.attach_configuration_pack(
+            _space(context, space), extension, identifier, order=order
+        ),
+    )
+
+
+@pack_app.command("detach")
+def pack_detach(
+    ctx: typer.Context,
+    extension: str,
+    identifier: str,
+    space: Annotated[str | None, typer.Option("--space")] = None,
+) -> None:
+    context = _context(ctx)
+    lifecycle = _extension_lifecycle(context, extension)
+    _run(
+        context,
+        lambda: lifecycle.detach_configuration_pack(
+            _space(context, space), extension, identifier
+        ),
+    )
 
 
 @register_app.command("repository")
