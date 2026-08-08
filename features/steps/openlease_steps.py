@@ -827,14 +827,17 @@ def defer_branch_selection(context, branch_selection: str) -> None:
     if branch_selection == "no branch":
         selection = BranchSelection()
         context.expected_branch = "successor"
+        context.expected_upstream = None
     elif branch_selection == "an available local":
         git(repo, "branch", "available", head)
         selection = BranchSelection("local", "available")
         context.expected_branch = "available"
+        context.expected_upstream = None
     else:
         git(repo, "update-ref", "refs/remotes/origin/topic", head)
         selection = BranchSelection("remote", "refs/remotes/origin/topic")
         context.expected_branch = "topic"
+        context.expected_upstream = None
     context.result = context.system.defer(
         "request", "successor", branches={"repo-1": selection}
     )
@@ -843,7 +846,9 @@ def defer_branch_selection(context, branch_selection: str) -> None:
 @then("OpenLease creates the worktree using {branch_result}")
 def branch_result(context, branch_result: str) -> None:
     del branch_result
-    assert member(context, "successor", "repo-1").branch == context.expected_branch
+    generated = member(context, "successor", "repo-1")
+    assert generated.branch == context.expected_branch
+    assert generated.upstream == context.expected_upstream
 
 
 @given("one affected repository's derived path or selected branch is unavailable")

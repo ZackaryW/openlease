@@ -48,6 +48,7 @@ class SpaceMemberRecord:
     starting_commit: str
     branch: str | None = None
     generated: bool = False
+    upstream: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -313,6 +314,7 @@ def _space_member(value: dict[str, Any]) -> SpaceMemberRecord:
             "starting_commit",
             "branch",
             "generated",
+            "upstream",
         },
     )
     generated = value.get("generated")
@@ -325,6 +327,7 @@ def _space_member(value: dict[str, Any]) -> SpaceMemberRecord:
         _string(value.get("starting_commit"), "member starting commit"),
         _optional_string(value.get("branch"), "member branch"),
         generated,
+        _optional_string(value.get("upstream"), "member upstream"),
     )
 
 

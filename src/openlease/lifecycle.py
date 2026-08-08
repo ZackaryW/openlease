@@ -992,6 +992,7 @@ class OpenLease:
                         item.start_commit,
                         created.branch,
                         True,
+                        created.upstream,
                     )
                 )
             pinned_members = tuple(
@@ -1002,6 +1003,7 @@ class OpenLease:
                     item.head,
                     self.git.inspect(item.source_path).branch,
                     False,
+                    self.git.inspect(item.source_path).upstream,
                 )
                 for item in preparation.pinned
             )
@@ -1259,6 +1261,7 @@ class OpenLease:
                     checkout.head,
                     checkout.branch,
                     False,
+                    checkout.upstream,
                 )
             )
         return tuple(members)
