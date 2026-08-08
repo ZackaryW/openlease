@@ -10,6 +10,7 @@ from features.support.openlease_support import (
     ensure_topology,
     git,
     member,
+    new_system,
     space,
 )
 from openlease import (
@@ -37,11 +38,16 @@ def isolate_a(context) -> None:
     context.selected = "successor"
 
 
-@then("OpenLease creates one repo 1 worktree for the affected child A claim")
+@then(
+    "OpenLease creates one adjacent repo 1-olease-1 worktree for the affected "
+    "child A claim"
+)
 def one_repo1_generated(context) -> None:
     generated = [item for item in context.result.data.members if item.generated]
     assert [item.repository_id for item in generated] == ["repo-1"]
-    assert Path(generated[0].effective_path).exists()
+    destination = Path(generated[0].effective_path)
+    assert destination == (context.repos["repo-1"].parent / "repo-1-olease-1").resolve()
+    assert destination.exists()
 
 
 @then("atomically locks child A in the successor")
@@ -86,7 +92,7 @@ def defer_unused(context) -> None:
     context.selected = "successor"
 
 
-@then("OpenLease creates one branch and linked worktree for repo 1")
+@then("OpenLease creates one adjacent repo 1-olease-1 branch worktree")
 def generated_repo1(context) -> None:
     one_repo1_generated(context)
     assert context.result.data.members[0].branch == "successor"
@@ -127,6 +133,19 @@ def external_worktrees(context) -> None:
     assert {
         item.repository_id for item in context.result.data.members if item.generated
     } == {"repo-2", "repo-3"}
+
+
+@then("places each generated worktree beside its own source repository")
+def external_worktrees_are_local(context) -> None:
+    generated = {
+        item.repository_id: Path(item.effective_path)
+        for item in context.result.data.members
+        if item.generated
+    }
+    assert generated == {
+        "repo-2": (context.repos["repo-2"].parent / "repo-2-olease-1").resolve(),
+        "repo-3": (context.repos["repo-3"].parent / "repo-3-olease-1").resolve(),
+    }
 
 
 @then("wires repo 2 to the authority path in the repo 3 successor worktree")
@@ -191,12 +210,98 @@ def branch_result(context, branch_result: str) -> None:
     assert generated.upstream == context.expected_upstream
 
 
-@given("one affected repository's derived path or selected branch is unavailable")
-def destination_collision(context) -> None:
+@given("repo 1-olease-1 is occupied by an unmanaged directory")
+def occupied_first_destination(context) -> None:
     branch_selection_setup(context)
-    collision = context.root / "worktrees" / "successor" / "repo-1-successor"
-    collision.mkdir(parents=True)
+    context.collision = context.repos["repo-1"].parent / "repo-1-olease-1"
+    context.collision.mkdir(parents=True)
+    context.marker = context.collision / "unmanaged.txt"
+    context.marker.write_text("unmanaged", encoding="utf-8")
     context.source_before = context.system.status("request").data["spaces"][0]
+
+
+@when("the owner defers the affected repo 1 claim")
+def defer_affected_repo1(context) -> None:
+    context.result = context.system.defer("request", "successor")
+
+
+@then("OpenLease leaves repo 1-olease-1 unchanged")
+def unmanaged_destination_unchanged(context) -> None:
+    assert context.marker.read_text(encoding="utf-8") == "unmanaged"
+
+
+@then("creates and records repo 1-olease-2 as the managed worktree")
+def second_destination_created(context) -> None:
+    generated = member(context, "successor", "repo-1")
+    assert (
+        Path(generated.effective_path)
+        == (context.repos["repo-1"].parent / "repo-1-olease-2").resolve()
+    )
+    assert Path(generated.effective_path).exists()
+
+
+@given("an explicit worktree base and an affected repo 1 claim")
+def explicit_base_setup(context) -> None:
+    context.explicit_base = context.root / "automation-worktrees"
+    context.system = new_system(context, worktree_base=context.explicit_base)
+    branch_selection_setup(context)
+
+
+@then("OpenLease creates repo 1-olease-1 beneath the explicit base")
+def explicit_base_destination(context) -> None:
+    generated = member(context, "successor", "repo-1")
+    assert (
+        Path(generated.effective_path)
+        == (context.explicit_base / "repo-1-olease-1").resolve()
+    )
+    assert Path(generated.effective_path).exists()
+
+
+@then("keeps machine-local state outside that generated worktree")
+def state_outside_generated_worktree(context) -> None:
+    generated = Path(member(context, "successor", "repo-1").effective_path)
+    assert not context.system.state_root.is_relative_to(generated)
+
+
+@given("the complete affected closure has reserved its exact worktree destinations")
+def install_late_destination_race(context) -> None:
+    ensure_topology(context)
+    space(context, "blocker", authorities=("shared",))
+    context.system.lock("blocker")
+    space(context, "request", repositories=("repo-2",))
+    context.source_before = context.system.status("request").data["spaces"][0]
+    delegate = context.system.git
+
+    class OccupyReservedDestination:
+        def __getattr__(self, name):
+            return getattr(delegate, name)
+
+        def create_worktree(self, source, request):
+            successor = next(
+                item
+                for item in context.system.snapshot().spaces
+                if item.identifier == "successor"
+            )
+            assert successor.status == "preparing"
+            context.reserved_paths = tuple(
+                Path(item.effective_path)
+                for item in successor.members
+                if item.generated
+            )
+            assert request.destination in context.reserved_paths
+            if context.occupy_reserved_destination:
+                request.destination.mkdir(parents=True)
+                context.race_marker = request.destination / "external.txt"
+                context.race_marker.write_text("external", encoding="utf-8")
+                context.occupy_reserved_destination = False
+            return delegate.create_worktree(source, request)
+
+    context.system.git = OccupyReservedDestination()
+
+
+@given("an external process occupies one destination before Git creation")
+def enable_late_destination_race(context) -> None:
+    context.occupy_reserved_destination = True
 
 
 @when("the owner defers the complete affected closure")
@@ -204,10 +309,10 @@ def defer_collision(context) -> None:
     capture(context, lambda: context.system.defer("request", "successor"))
 
 
-@then("OpenLease does not overwrite or reuse the collision")
+@then("OpenLease does not overwrite or adopt the collision")
 def collision_preserved(context) -> None:
     assert isinstance(context.error, PreparationFailed)
-    assert (context.root / "worktrees" / "successor" / "repo-1-successor").exists()
+    assert context.race_marker.read_text(encoding="utf-8") == "external"
 
 
 @then("leaves the source space unchanged")
@@ -215,17 +320,18 @@ def source_unchanged(context) -> None:
     assert context.system.status("request").data["spaces"][0] == context.source_before
 
 
-@then("publishes no usable deferred successor")
-def no_usable_successor(context) -> None:
+@then("records the reserved paths in a non-writable preparation-failed successor")
+def reserved_paths_remain_journaled(context) -> None:
     successor = next(
-        (
-            item
-            for item in context.system.snapshot().spaces
-            if item.identifier == "successor"
-        ),
-        None,
+        item
+        for item in context.system.snapshot().spaces
+        if item.identifier == "successor"
     )
-    assert successor is None or successor.status == "preparation_failed"
+    assert successor.status == "preparation_failed"
+    assert (
+        tuple(Path(item.effective_path) for item in successor.members if item.generated)
+        == context.reserved_paths
+    )
 
 
 @given("deferral created one affected worktree before a later repository failed")
@@ -479,6 +585,55 @@ def pending_debt(context) -> None:
         if item.space_id == "successor" and item.status == "pending"
     }
     assert pending == generated
+
+
+@given(
+    "an existing successor records a generated worktree beneath the former "
+    "centralized base"
+)
+def existing_centralized_successor(context) -> None:
+    context.former_base = context.root / "former-centralized-worktrees"
+    context.system = new_system(context, worktree_base=context.former_base)
+    blocked_successor(context, locked=True)
+    context.system.release("successor")
+    context.recorded_member = member(context, "successor", "repo-1")
+    context.recorded_path = Path(context.recorded_member.effective_path)
+    assert context.recorded_path.is_relative_to(context.former_base.resolve())
+    context.system.worktree_base = None
+
+
+@when("the owner inspects and reconciles that generated member")
+def inspect_and_plan_recorded_member(context) -> None:
+    inspected = context.system.status("successor").data["spaces"][0]
+    selected = next(
+        item
+        for item in inspected.members
+        if item.repository_id == context.recorded_member.repository_id
+    )
+    context.inspected_path = Path(selected.effective_path)
+    destination_branch = git(Path(selected.source_path), "branch", "--show-current")
+    context.system.reconcile_plan(
+        "successor",
+        (
+            ReconcileSelection(
+                selected.repository_id,
+                destination_branch,
+                IntegrationStrategy.MERGE,
+            ),
+        ),
+    )
+
+
+@then("OpenLease continues using the exact recorded worktree path")
+def exact_recorded_path_retained(context) -> None:
+    assert context.inspected_path == context.recorded_path
+    assert context.recorded_path.exists()
+
+
+@then("does not move or rename the existing worktree")
+def recorded_worktree_not_moved(context) -> None:
+    adjacent = context.repos["repo-1"].parent / "repo-1-olease-1"
+    assert not adjacent.exists()
 
 
 def released_with_change(context, *, external: bool = False) -> None:

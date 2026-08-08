@@ -127,9 +127,9 @@ def blocked_successor(context, *, external: bool = False, locked: bool = False) 
         context.system.lock("successor")
 
 
-def new_system(context) -> OpenLease:
+def new_system(context, *, worktree_base: Path | None = None) -> OpenLease:
     return OpenLease(
         context.root / "state",
-        worktree_base=context.root / "worktrees",
+        worktree_base=worktree_base,
         openspec=context.openspec,
     )

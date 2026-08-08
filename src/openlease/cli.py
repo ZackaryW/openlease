@@ -64,8 +64,9 @@ def configure(
     root = state_root or _env_path(
         "OPENLEASE_STATE_ROOT", str(Path.home() / ".openlease")
     )
-    base = worktree_base or _env_path(
-        "OPENLEASE_WORKTREE_BASE", str(root / "worktrees")
+    configured_base = os.environ.get("OPENLEASE_WORKTREE_BASE")
+    base = worktree_base or (
+        Path(configured_base).expanduser().resolve() if configured_base else None
     )
     ctx.obj = Context(OpenLease(root, worktree_base=base), space, json_output)
 

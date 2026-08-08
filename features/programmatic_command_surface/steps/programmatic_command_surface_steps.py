@@ -193,7 +193,7 @@ def paths_bounded(context) -> None:
     for item in context.result.data.members:
         if item.generated:
             assert os.path.samefile(
-                Path(item.effective_path).parent.parent,
+                Path(item.effective_path).parent,
                 context.system.worktree_base,
             )
 

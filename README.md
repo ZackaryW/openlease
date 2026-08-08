@@ -72,6 +72,19 @@ If `lockable` is false, prepare only affected repositories in a distinct cohort:
 openlease --space my-change defer my-change-deferred
 ```
 
+Machine-local coordination state defaults to `~/.openlease`. Generated worktrees
+do not: without an override, each affected repository is materialized beside its
+registered checkout as `<repository-directory>-olease-<n>`, using the lowest
+available positive suffix. A multi-repository cohort may therefore span several
+parent directories while its exact paths remain wired together in state.
+
+Use `--worktree-base PATH` or `OPENLEASE_WORKTREE_BASE` for isolated automation;
+the same names are allocated directly beneath that base. Existing files,
+directories, symbolic links, durable reservations, and Git-registered worktree
+paths consume a suffix. The name is only a visual hint: exact recorded state is
+the ownership evidence, so OpenLease never adopts or cleans up a matching path
+merely because it contains `-olease-<n>`.
+
 `defer` does not grant conflicting write authority. After every blocker is
 released and marked `integrated`, `abandoned`, or `superseded`, explicitly lock
 the clean successor. Generated branches remain reconciliation debt after release.

@@ -3,7 +3,12 @@ from pathlib import Path
 
 import pytest
 
-from openlease import AuthorityConflict, OpenLease, ReconcileSelection
+from openlease import (
+    AuthorityConflict,
+    OpenLease,
+    PreparationFailed,
+    ReconcileSelection,
+)
 from openlease.core.graph import AccessRole
 from openlease.utils.git_adapter import IntegrationStrategy
 from openlease.utils.openspec_adapter import OpenSpecWorkset
@@ -136,6 +141,78 @@ def test_external_writable_closure_generates_consumer_and_provider(
         item for item in successor.members if item.repository_id == "repo-3"
     )
     assert authority_path == Path(repo3_member.effective_path) / "openspec"
+
+
+def test_failed_preparation_reservation_consumes_its_exact_destination(
+    tmp_path: Path,
+) -> None:
+    system, _, _ = _system(tmp_path)
+    _space(system, "blocker", "a")
+    system.lock("blocker")
+    _space(system, "request", "a")
+    delegate = system.git
+
+    class FailCreation:
+        def __getattr__(self, name):
+            return getattr(delegate, name)
+
+        def create_worktree(self, source, request):
+            del source, request
+            raise RuntimeError("injected failure before Git mutation")
+
+    system.git = FailCreation()
+    with pytest.raises(PreparationFailed):
+        system.defer("request", "failed-successor")
+    failed = system.status("failed-successor").data["spaces"][0]
+    reserved = next(item for item in failed.members if item.generated)
+    assert Path(reserved.effective_path).name == "repo-1-olease-1"
+    assert not Path(reserved.effective_path).exists()
+
+    system.git = delegate
+    successor = system.defer("request", "next-successor").data
+
+    generated = next(item for item in successor.members if item.generated)
+    assert Path(generated.effective_path).name == "repo-1-olease-2"
+
+
+def test_git_registered_missing_worktree_path_consumes_its_suffix(
+    tmp_path: Path,
+) -> None:
+    system, repos, _ = _system(tmp_path)
+    _space(system, "blocker", "a")
+    system.lock("blocker")
+    _space(system, "request", "a")
+    registered = tmp_path / "worktrees" / "repo-1-olease-1"
+    registered.parent.mkdir()
+    _git(repos["repo-1"], "worktree", "add", "--detach", str(registered), "HEAD")
+    registered.rename(tmp_path / "moved-registered-worktree")
+    assert not registered.exists()
+
+    successor = system.defer("request", "successor").data
+
+    generated = next(item for item in successor.members if item.generated)
+    assert Path(generated.effective_path).name == "repo-1-olease-2"
+
+
+def test_unmanaged_symbolic_link_consumes_its_suffix(tmp_path: Path) -> None:
+    system, _, _ = _system(tmp_path)
+    _space(system, "blocker", "a")
+    system.lock("blocker")
+    _space(system, "request", "a")
+    target = tmp_path / "unmanaged-target"
+    target.mkdir()
+    link = tmp_path / "worktrees" / "repo-1-olease-1"
+    link.parent.mkdir()
+    try:
+        link.symlink_to(target, target_is_directory=True)
+    except OSError as error:
+        pytest.skip(f"directory symbolic links are unavailable: {error}")
+
+    successor = system.defer("request", "successor").data
+
+    generated = next(item for item in successor.members if item.generated)
+    assert Path(generated.effective_path).name == "repo-1-olease-2"
+    assert link.is_symlink()
 
 
 def test_repeated_lock_is_a_compatible_noop(tmp_path: Path) -> None:

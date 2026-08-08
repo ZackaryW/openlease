@@ -88,9 +88,7 @@ class OpenLease:
     ) -> None:
         self.state_root = state_root.resolve()
         self.worktree_base = (
-            worktree_base.resolve()
-            if worktree_base is not None
-            else (self.state_root / "worktrees").resolve()
+            worktree_base.resolve() if worktree_base is not None else None
         )
         self.repository = StateRepository(self.state_root)
         self.git = git or GitAdapter()
@@ -760,7 +758,7 @@ class OpenLease:
         if space.status != "preparation_failed":
             raise InvalidRequest("space has no failed preparation")
         plan = self._affected_plan(state, space)
-        completed = {item.repository_id for item in space.members if item.generated}
+        completed = {item.repository_id for item in space.preparation_artifacts}
         missing = tuple(
             item for item in plan.work_repositories if item not in completed
         )
@@ -923,18 +921,41 @@ class OpenLease:
         all_ids = tuple(
             dict.fromkeys(source.associated_repository_ids + plan.work_repositories)
         )
-        preparation = plan_preparation(
-            tuple(
-                PreparationMember(
-                    repository_id,
-                    Path(repositories[repository_id].path),
-                    self.git.inspect(Path(repositories[repository_id].path)).head,
-                    repository_id in plan.work_repositories,
+        preparation_members = tuple(
+            PreparationMember(
+                repository_id,
+                Path(repositories[repository_id].path),
+                self.git.inspect(Path(repositories[repository_id].path)).head,
+                repository_id in plan.work_repositories,
+            )
+            for repository_id in all_ids
+        )
+        occupied_paths = {
+            Path(member.effective_path).resolve()
+            for current_space in state.spaces
+            for member in current_space.members
+            if member.generated
+        }
+        occupied_paths.update(
+            Path(artifact.path).resolve()
+            for current_space in state.spaces
+            for artifact in current_space.preparation_artifacts
+        )
+        for item in preparation_members:
+            if not item.affected:
+                continue
+            base = self.worktree_base or item.source_path.parent
+            if base.exists():
+                occupied_paths.update(
+                    candidate.resolve()
+                    for candidate in base.glob(f"{item.source_path.name}-olease-*")
                 )
-                for repository_id in all_ids
-            ),
+            occupied_paths.update(self.git.worktree_paths(item.source_path))
+        preparation = plan_preparation(
+            preparation_members,
             successor_name,
-            self.worktree_base / successor_name,
+            self.worktree_base,
+            frozenset(occupied_paths),
         )
         requests = {
             item.repository_id: self._worktree_request(
@@ -944,16 +965,30 @@ class OpenLease:
             )
             for item in preparation.generated
         }
-        collisions = tuple(
-            str(request.destination)
-            for request in requests.values()
-            if request.destination.exists() or request.destination.is_symlink()
-        )
-        if collisions:
-            raise PreparationFailed(
-                "successor preparation preflight found unavailable destinations",
-                details={"collisions": collisions},
+        pinned_members = tuple(
+            SpaceMemberRecord(
+                item.repository_id,
+                str(item.source_path.resolve()),
+                str(item.source_path.resolve()),
+                item.head,
+                self.git.inspect(item.source_path).branch,
+                False,
+                self.git.inspect(item.source_path).upstream,
             )
+            for item in preparation.pinned
+        )
+        reserved_generated_members = tuple(
+            SpaceMemberRecord(
+                item.repository_id,
+                str(item.source_path.resolve()),
+                str(requests[item.repository_id].destination.resolve()),
+                item.start_commit,
+                requests[item.repository_id].branch,
+                True,
+            )
+            for item in preparation.generated
+        )
+        reserved_members = reserved_generated_members + pinned_members
         blocker_ids = tuple(sorted({item.owner_id for item in conflicts}))
         preparing = SpaceRecord(
             successor_name,
@@ -964,6 +999,7 @@ class OpenLease:
             blockers=blocker_ids,
             source_space_id=space_id,
             graph_generation=state.graph_generation,
+            members=reserved_members,
         )
         reserved = self.repository.mutate(
             state.generation,
@@ -972,6 +1008,16 @@ class OpenLease:
         artifacts: list[PreparedArtifactRecord] = []
         generated_members: list[SpaceMemberRecord] = []
         try:
+            collisions = tuple(
+                str(request.destination)
+                for request in requests.values()
+                if request.destination.exists() or request.destination.is_symlink()
+            )
+            if collisions:
+                raise FileExistsError(
+                    "reserved worktree destinations became unavailable: "
+                    + ", ".join(collisions)
+                )
             for item in preparation.generated:
                 request = requests[item.repository_id]
                 created = self.git.create_worktree(
@@ -995,18 +1041,6 @@ class OpenLease:
                         created.upstream,
                     )
                 )
-            pinned_members = tuple(
-                SpaceMemberRecord(
-                    item.repository_id,
-                    str(item.source_path.resolve()),
-                    str(item.source_path.resolve()),
-                    item.head,
-                    self.git.inspect(item.source_path).branch,
-                    False,
-                    self.git.inspect(item.source_path).upstream,
-                )
-                for item in preparation.pinned
-            )
             members = tuple(generated_members) + pinned_members
             projected = replace(preparing, members=members)
             projection_members = self._projection_members(reserved, projected)
@@ -1018,7 +1052,7 @@ class OpenLease:
             failed = replace(
                 self._space(current, successor_name),
                 status="preparation_failed",
-                members=tuple(generated_members),
+                members=reserved_members,
                 preparation_artifacts=tuple(artifacts),
             )
             self.repository.mutate(
