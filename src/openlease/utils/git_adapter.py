@@ -41,6 +41,8 @@ class MergeLeg:
     source_ref: str
     destination_ref: str
     strategy: IntegrationStrategy
+    source_checkout: Path | None = None
+    expected_destination_commit: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -168,6 +170,33 @@ class GitAdapter:
         )
         return tuple(ChangedPath(line) for line in result.stdout.splitlines() if line)
 
+    def worktree_changed_paths(
+        self, checkout: GitCheckout, base: str
+    ) -> tuple[ChangedPath, ...]:
+        tracked = require_success(
+            self._git(
+                checkout.root,
+                "diff",
+                "--name-only",
+                "--diff-filter=ACDMRTUXB",
+                base,
+                "--",
+            ),
+            "Git working-copy path inspection",
+        )
+        untracked = require_success(
+            self._git(
+                checkout.root,
+                "ls-files",
+                "--others",
+                "--exclude-standard",
+                "--",
+            ),
+            "Git untracked-path inspection",
+        )
+        paths = set(tracked.stdout.splitlines()) | set(untracked.stdout.splitlines())
+        return tuple(ChangedPath(path) for path in sorted(paths) if path)
+
     def preview_integration(self, leg: MergeLeg) -> MergePreview:
         source = require_success(
             self._git(leg.checkout, "rev-parse", "--verify", leg.source_ref),
@@ -212,19 +241,39 @@ class GitAdapter:
         )
 
     def apply_integration(self, leg: MergeLeg) -> IntegrationResult:
-        checkout = self.inspect(leg.checkout)
-        if checkout.dirty:
-            raise ValueError(f"Git checkout is dirty: {checkout.root}")
+        destination = self.inspect(leg.checkout)
+        if destination.dirty:
+            raise ValueError(f"Git checkout is dirty: {destination.root}")
+        destination_commit = require_success(
+            self._git(destination.root, "rev-parse", "--verify", leg.destination_ref),
+            "Git destination-ref inspection",
+        ).stdout.strip()
+        if (
+            leg.expected_destination_commit is not None
+            and destination_commit != leg.expected_destination_commit
+        ):
+            raise ValueError("Git destination moved after integration planning")
+        if destination.head != destination_commit:
+            raise ValueError("Git destination checkout is not at the destination ref")
         if leg.strategy is IntegrationStrategy.MERGE:
             require_success(
-                self._git(checkout.root, "merge", "--no-edit", leg.source_ref),
+                self._git(destination.root, "merge", "--no-edit", leg.source_ref),
                 "Git merge",
             )
         else:
-            if checkout.branch != leg.source_ref:
+            if leg.source_checkout is None:
+                raise ValueError("rebase integration requires a source checkout")
+            source = self.inspect(leg.source_checkout)
+            if source.dirty:
+                raise ValueError(f"Git checkout is dirty: {source.root}")
+            if source.branch != leg.source_ref:
                 raise ValueError("rebase checkout is not on the source branch")
             require_success(
-                self._git(checkout.root, "rebase", leg.destination_ref),
+                self._git(source.root, "rebase", destination_commit),
                 "Git rebase",
             )
-        return IntegrationResult(leg.strategy, self.inspect(checkout.root).head)
+            require_success(
+                self._git(destination.root, "merge", "--ff-only", leg.source_ref),
+                "Git rebased-source fast-forward",
+            )
+        return IntegrationResult(leg.strategy, self.inspect(destination.root).head)

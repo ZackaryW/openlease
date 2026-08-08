@@ -140,6 +140,27 @@ def test_reports_changed_paths_and_previews_integration_without_mutation(
     assert adapter.inspect(repository).head == source.head
 
 
+def test_reports_committed_staged_unstaged_and_untracked_paths(tmp_path: Path) -> None:
+    repository = _repository(tmp_path / "repository")
+    adapter = GitAdapter()
+    baseline = adapter.inspect(repository)
+    (repository / "committed.txt").write_text("committed", encoding="utf-8")
+    _git(repository, "add", "committed.txt")
+    _git(repository, "commit", "--quiet", "-m", "committed")
+    (repository / "staged.txt").write_text("staged", encoding="utf-8")
+    _git(repository, "add", "staged.txt")
+    (repository / "committed.txt").write_text("unstaged", encoding="utf-8")
+    (repository / "untracked.txt").write_text("untracked", encoding="utf-8")
+
+    changed = adapter.worktree_changed_paths(adapter.inspect(repository), baseline.head)
+
+    assert [item.path for item in changed] == [
+        "committed.txt",
+        "staged.txt",
+        "untracked.txt",
+    ]
+
+
 def test_applies_an_explicit_merge_leg(tmp_path: Path) -> None:
     repository = _repository(tmp_path / "repository")
     adapter = GitAdapter()
@@ -183,14 +204,46 @@ def test_applies_an_explicit_rebase_leg(tmp_path: Path) -> None:
 
     result = adapter.apply_integration(
         MergeLeg(
-            feature_path,
+            repository,
             "feature",
             source.branch or "master",
             IntegrationStrategy.REBASE,
+            source_checkout=feature_path,
+            expected_destination_commit=_git(
+                repository, "rev-parse", source.branch or "master"
+            ),
         )
     )
 
     assert result.head == _git(feature_path, "rev-parse", "feature")
+    assert adapter.inspect(repository).head == result.head
     assert _git(
         feature_path, "merge-base", "feature", source.branch or "master"
     ) == _git(repository, "rev-parse", source.branch or "master")
+
+
+def test_rejects_rebase_when_the_destination_moved_after_planning(
+    tmp_path: Path,
+) -> None:
+    repository = _repository(tmp_path / "repository")
+    adapter = GitAdapter()
+    source = adapter.inspect(repository)
+    feature_path = tmp_path / "feature"
+    adapter.create_worktree(
+        source, WorktreeRequest(feature_path, "feature", source.head)
+    )
+    (repository / "moved.txt").write_text("moved", encoding="utf-8")
+    _git(repository, "add", "moved.txt")
+    _git(repository, "commit", "--quiet", "-m", "moved")
+
+    with pytest.raises(ValueError, match="destination moved"):
+        adapter.apply_integration(
+            MergeLeg(
+                repository,
+                "feature",
+                source.branch or "master",
+                IntegrationStrategy.REBASE,
+                source_checkout=feature_path,
+                expected_destination_commit=source.head,
+            )
+        )
