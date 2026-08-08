@@ -6,7 +6,7 @@ Feature: Defer and reconcile affected branch cohorts
   Scenario: Isolate compatible child work on another branch
     Given child A is lockable while child B work uses the canonical repo 1 checkout
     When the owner isolates the child A space with a successor name
-    Then OpenLease creates one repo 1 worktree for the affected child A claim
+    Then OpenLease creates one adjacent repo 1-olease-1 worktree for the affected child A claim
     And atomically locks child A in the successor
     And leaves child B's space and checkout unchanged
 
@@ -15,7 +15,7 @@ Feature: Defer and reconcile affected branch cohorts
     And the affected closure contains only child A in repo 1
     And the selected space is non-lockable
     When the owner defers it with an unused successor name
-    Then OpenLease creates one branch and linked worktree for repo 1
+    Then OpenLease creates one adjacent repo 1-olease-1 branch worktree
     And records repo 2 and repo 3 as pinned context without generated worktrees
     And publishes a distinct deferred successor space with no leases
 
@@ -24,6 +24,7 @@ Feature: Defer and reconcile affected branch cohorts
     And the selected space is non-lockable
     When the owner defers it
     Then OpenLease creates affected worktrees for repo 2 and repo 3
+    And places each generated worktree beside its own source repository
     And wires repo 2 to the authority path in the repo 3 successor worktree
     And leaves the source space and shared OpenSpec registration unchanged
 
@@ -38,12 +39,25 @@ Feature: Defer and reconcile affected branch cohorts
       | an available local   | that existing local branch                     |
       | a resolvable remote  | a corresponding local branch from that remote  |
 
-  Scenario: Reject a deferred destination collision without partial publication
-    Given one affected repository's derived path or selected branch is unavailable
+  Scenario: Increment past an occupied managed-worktree name
+    Given repo 1-olease-1 is occupied by an unmanaged directory
+    When the owner defers the affected repo 1 claim
+    Then OpenLease leaves repo 1-olease-1 unchanged
+    And creates and records repo 1-olease-2 as the managed worktree
+
+  Scenario: Place generated worktrees beneath an explicit automation base
+    Given an explicit worktree base and an affected repo 1 claim
+    When the owner defers the affected repo 1 claim
+    Then OpenLease creates repo 1-olease-1 beneath the explicit base
+    And keeps machine-local state outside that generated worktree
+
+  Scenario: Reject a late deferred destination race without adoption
+    Given the complete affected closure has reserved its exact worktree destinations
+    And an external process occupies one destination before Git creation
     When the owner defers the complete affected closure
-    Then OpenLease does not overwrite or reuse the collision
+    Then OpenLease does not overwrite or adopt the collision
     And leaves the source space unchanged
-    And publishes no usable deferred successor
+    And records the reserved paths in a non-writable preparation-failed successor
 
   Scenario: Retain a preparation journal after incomplete rollback
     Given deferral created one affected worktree before a later repository failed
@@ -92,6 +106,12 @@ Feature: Defer and reconcile affected branch cohorts
     Then OpenLease removes its leases and owned projection
     And preserves every generated affected branch and worktree
     And records each generated member as pending reconciliation
+
+  Scenario: Preserve a previously recorded centralized worktree path
+    Given an existing successor records a generated worktree beneath the former centralized base
+    When the owner inspects and reconciles that generated member
+    Then OpenLease continues using the exact recorded worktree path
+    And does not move or rename the existing worktree
 
   Scenario: Plan an explicit later merge path
     Given a released successor has pending generated branches
