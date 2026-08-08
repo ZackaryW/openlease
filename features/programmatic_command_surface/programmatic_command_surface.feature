@@ -1,3 +1,4 @@
+@programmatic-command-surface
 Feature: Use OpenLease through one library-first lifecycle
   Automation and terminal users receive the same deterministic behavior without
   requiring optional CLI dependencies in library-only installations.

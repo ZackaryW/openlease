@@ -1,3 +1,5 @@
+"""Shared OpenLease behavior fixtures used by every capability root."""
+
 from __future__ import annotations
 
 import subprocess
@@ -90,6 +92,22 @@ def space(
                 authority_ids=authorities,
                 repository_ids=repositories,
             )
+
+
+def capture(context, operation) -> None:
+    context.error = None
+    context.result = None
+    try:
+        context.result = operation()
+    except Exception as error:
+        context.error = error
+
+
+def member(context, space_id: str, repository_id: str):
+    current = next(
+        item for item in context.system.snapshot().spaces if item.identifier == space_id
+    )
+    return next(item for item in current.members if item.repository_id == repository_id)
 
 
 def blocked_successor(context, *, external: bool = False, locked: bool = False) -> None:

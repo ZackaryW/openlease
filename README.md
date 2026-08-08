@@ -97,7 +97,7 @@ the integration authority for those cases.
 ```console
 uv sync --all-extras --dev
 uv run pytest -q
-uv run behave
-uv run ruff check src tests features/steps features/support.py features/environment.py
+zpp behave bdd-audit --all
+uv run ruff check src tests features scripts
 uv build
 ```

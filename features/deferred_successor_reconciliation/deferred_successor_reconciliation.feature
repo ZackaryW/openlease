@@ -1,3 +1,4 @@
+@deferred-successor-reconciliation
 Feature: Defer and reconcile affected branch cohorts
   OpenLease users can prepare blocked work without weakening authority exclusion,
   then integrate every generated branch through an explicit merge path.
@@ -55,7 +56,7 @@ Feature: Defer and reconcile affected branch cohorts
   Scenario: Keep a deferred successor blocked by logical authority
     Given a deferred successor uses different worktree paths from its blocker
     When the blocker still owns one requested logical authority
-    Then lockable remains false for that authority
+    Then successor lockable remains false for that authority
     And the successor cannot perform OpenLease-governed protected mutation
 
   Scenario: Release alone does not promote stale deferred work

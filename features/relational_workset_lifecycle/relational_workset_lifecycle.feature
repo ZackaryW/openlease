@@ -1,3 +1,4 @@
+@relational-workset-lifecycle
 Feature: Build relational OpenLease spaces
   OpenLease users can compose repositories and OpenSpec authorities into durable
   spaces without flattening their containment and dependency relationships.

@@ -1,0 +1,107 @@
+version: 1
+commands:
+  bdd:
+    provider:
+      kind: argv
+      argv: [uv, run, python, scripts/run_behave_roots.py, "{targets}"]
+    targets:
+      relational-workset-lifecycle:
+        value: features/relational_workset_lifecycle
+        paths:
+          - features/relational_workset_lifecycle/**
+          - features/support/**
+          - features/__init__.py
+          - scripts/run_behave_roots.py
+          - behave.ini
+          - pyproject.toml
+          - uv.lock
+          - zpp.behave.yaml
+          - src/openlease/__init__.py
+          - src/openlease/errors.py
+          - src/openlease/lifecycle.py
+          - src/openlease/result.py
+          - src/openlease/core/graph.py
+          - src/openlease/core/state_codec.py
+          - src/openlease/utils/git_adapter.py
+          - src/openlease/utils/openspec_adapter.py
+          - src/openlease/utils/ownership.py
+          - src/openlease/utils/state_repository.py
+      collision-aware-leasing:
+        value: features/collision_aware_leasing
+        paths:
+          - features/collision_aware_leasing/**
+          - features/support/**
+          - features/__init__.py
+          - scripts/run_behave_roots.py
+          - behave.ini
+          - pyproject.toml
+          - uv.lock
+          - zpp.behave.yaml
+          - src/openlease/__init__.py
+          - src/openlease/errors.py
+          - src/openlease/lifecycle.py
+          - src/openlease/result.py
+          - src/openlease/core/graph.py
+          - src/openlease/core/state_codec.py
+          - src/openlease/utils/openspec_adapter.py
+          - src/openlease/utils/ownership.py
+          - src/openlease/utils/state_repository.py
+      deferred-successor-reconciliation:
+        value: features/deferred_successor_reconciliation
+        paths:
+          - features/deferred_successor_reconciliation/**
+          - features/support/**
+          - features/__init__.py
+          - scripts/run_behave_roots.py
+          - behave.ini
+          - pyproject.toml
+          - uv.lock
+          - zpp.behave.yaml
+          - src/openlease/__init__.py
+          - src/openlease/errors.py
+          - src/openlease/lifecycle.py
+          - src/openlease/result.py
+          - src/openlease/core/graph.py
+          - src/openlease/core/preparation.py
+          - src/openlease/core/reconciliation.py
+          - src/openlease/core/state_codec.py
+          - src/openlease/utils/git_adapter.py
+          - src/openlease/utils/openspec_adapter.py
+          - src/openlease/utils/ownership.py
+          - src/openlease/utils/processes.py
+          - src/openlease/utils/state_repository.py
+      programmatic-command-surface:
+        value: features/programmatic_command_surface
+        paths:
+          - features/programmatic_command_surface/**
+          - features/support/**
+          - features/__init__.py
+          - scripts/run_behave_roots.py
+          - behave.ini
+          - pyproject.toml
+          - uv.lock
+          - zpp.behave.yaml
+          - src/openlease/__init__.py
+          - src/openlease/cli.py
+          - src/openlease/errors.py
+          - src/openlease/lifecycle.py
+          - src/openlease/result.py
+          - src/openlease/core/state_codec.py
+          - src/openlease/utils/state_repository.py
+  bdd-audit:
+    provider:
+      kind: argv
+      argv: [uv, run, python, scripts/run_behave_roots.py, "{targets}"]
+    targets:
+      relational-workset-lifecycle:
+        value: features/relational_workset_lifecycle
+        paths: ["**"]
+      collision-aware-leasing:
+        value: features/collision_aware_leasing
+        paths: ["**"]
+      deferred-successor-reconciliation:
+        value: features/deferred_successor_reconciliation
+        paths: ["**"]
+      programmatic-command-surface:
+        value: features/programmatic_command_surface
+        paths: ["**"]

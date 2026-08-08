@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from tempfile import TemporaryDirectory
 
-from support import MemoryOpenSpec, new_system
+from features.support.openlease_support import MemoryOpenSpec, new_system
 
 
 def before_scenario(context, scenario) -> None:

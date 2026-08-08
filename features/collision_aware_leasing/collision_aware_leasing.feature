@@ -1,3 +1,4 @@
+@collision-aware-leasing
 Feature: Lease affected OpenSpec authorities without false collisions
   OpenLease users can serialize overlapping specification work while compatible
   child authorities and read-only context remain concurrently usable.
@@ -6,7 +7,7 @@ Feature: Lease affected OpenSpec authorities without false collisions
     Given a space has associated repositories but no complete explicit authority graph or affected claim
     When the owner runs lockable or lock
     Then OpenLease rejects acquisition without inferring or persisting relationships
-    And no lease or projection changes
+    And no lease or projection is added
 
   Scenario: Expand an affected external authority
     Given repo 2 is affected
