@@ -9,6 +9,24 @@ Feature: Use OpenLease through one library-first lifecycle
     Then the import succeeds without importing Typer
     And the complete public lifecycle is available through the library
 
+  Scenario: Declare Python 3.11 as the exact interpreter floor
+    Given a built OpenLease distribution
+    When a package installer evaluates its Python requirement
+    Then Python 3.11 and newer interpreters are accepted without an upper bound
+    And interpreters older than Python 3.11 are rejected
+
+  Scenario: Install the base library on Python 3.11
+    Given the base OpenLease distribution is installed with Python 3.11
+    When a Python consumer imports the public package
+    Then the import succeeds without importing Typer
+    And the complete public lifecycle matches a newer supported interpreter
+
+  Scenario: Use the optional CLI on Python 3.11
+    Given the OpenLease CLI extra is installed with Python 3.11
+    When a user invokes a public command with JSON output
+    Then the command delegates to the same public library lifecycle
+    And it preserves the documented result envelope and process status
+
   Scenario: Delegate CLI commands to the public lifecycle
     Given the optional CLI extra is installed
     When a user runs a topology, space, lease, defer, or reconcile command
