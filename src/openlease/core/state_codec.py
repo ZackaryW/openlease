@@ -298,12 +298,8 @@ def encode_state(state: OpenLeaseState) -> bytes:
         "reconciliations": [asdict(item) for item in state.reconciliations],
         "configuration_generation": state.configuration_generation,
         "extension_roots": [asdict(item) for item in state.extension_roots],
-        "configuration_packs": [
-            asdict(item) for item in state.configuration_packs
-        ],
-        "configuration_sources": [
-            asdict(item) for item in state.configuration_sources
-        ],
+        "configuration_packs": [asdict(item) for item in state.configuration_packs],
+        "configuration_sources": [asdict(item) for item in state.configuration_sources],
         "space_pack_attachments": [
             asdict(item) for item in state.space_pack_attachments
         ],
@@ -389,10 +385,14 @@ def validate_state(state: OpenLeaseState) -> OpenLeaseState:
             raise StateFormatError(
                 "configuration source scope is missing an identifier"
             )
-        if source.scope_kind == "pack" and (
-            source.extension_id,
-            source.scope_id,
-        ) not in known_packs:
+        if (
+            source.scope_kind == "pack"
+            and (
+                source.extension_id,
+                source.scope_id,
+            )
+            not in known_packs
+        ):
             raise StateFormatError("configuration source has a missing pack")
         if source.scope_kind == "space" and source.scope_id not in known_spaces:
             raise StateFormatError("configuration source has a missing space")

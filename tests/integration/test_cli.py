@@ -217,9 +217,7 @@ def test_cli_binds_and_resolves_an_opaque_extension_document(
         ),
     )
     for command in commands:
-        completed = runner.invoke(
-            app, ["--state-root", str(state_root), *command]
-        )
+        completed = runner.invoke(app, ["--state-root", str(state_root), *command])
         assert completed.exit_code == 0, completed.output
 
     resolved = runner.invoke(
@@ -269,9 +267,7 @@ def test_cli_manages_pack_attachments_and_source_removal(tmp_path: Path) -> None
     )
 
     for command in commands:
-        completed = runner.invoke(
-            app, ["--state-root", str(state_root), *command]
-        )
+        completed = runner.invoke(app, ["--state-root", str(state_root), *command])
         assert completed.exit_code == 0, completed.output
 
     state = OpenLease(state_root).snapshot()
@@ -285,9 +281,7 @@ def test_cli_rejects_an_ambiguous_extension_target_without_partial_state(
 ) -> None:
     runner = CliRunner()
     state_root = tmp_path / "state"
-    runner.invoke(
-        app, ["--state-root", str(state_root), "space", "create", "work"]
-    )
+    runner.invoke(app, ["--state-root", str(state_root), "space", "create", "work"])
     before = OpenLease(state_root).snapshot()
 
     failed = runner.invoke(

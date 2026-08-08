@@ -99,8 +99,10 @@ def resolve_extension_roots(
     extension_id: str,
     policy: ExtensionRootPolicy,
 ) -> ExtensionRoots:
-    if not extension_id or extension_id in {".", ".."} or any(
-        separator in extension_id for separator in ("/", "\\")
+    if (
+        not extension_id
+        or extension_id in {".", ".."}
+        or any(separator in extension_id for separator in ("/", "\\"))
     ):
         raise ConfigurationError("extension identifier must be one path segment")
     state_namespace = state_root.resolve() / "extensions" / extension_id
@@ -117,9 +119,7 @@ def resolve_extension_roots(
             return ResolvedRoot(
                 (product_namespace / role).resolve(), RootProvenance.PRODUCT_ROOT
             )
-        return ResolvedRoot(
-            (state_namespace / role).resolve(), RootProvenance.DEFAULT
-        )
+        return ResolvedRoot((state_namespace / role).resolve(), RootProvenance.DEFAULT)
 
     return ExtensionRoots(
         configuration=select(policy.configuration_root, "configuration"),

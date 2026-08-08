@@ -126,11 +126,7 @@ def test_plans_configuration_in_scope_specificity_order(tmp_path: Path) -> None:
         ),
         parents=(ParentRecord("child-a", "root"), ParentRecord("child-b", "root")),
         dependencies=(DependencyRecord("child-a", "provider", "read_only"),),
-        spaces=(
-            SpaceRecord(
-                "work", associated_repository_ids=("repo-1", "repo-3")
-            ),
-        ),
+        spaces=(SpaceRecord("work", associated_repository_ids=("repo-1", "repo-3")),),
         configuration_packs=(
             ConfigurationPackRecord("first", "zpp"),
             ConfigurationPackRecord("second", "zpp"),

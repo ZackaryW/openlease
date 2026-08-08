@@ -1912,8 +1912,7 @@ class OpenLease:
                 (
                     item
                     for item in state.space_pack_attachments
-                    if item.space_id == space_id
-                    and item.extension_id == extension_id
+                    if item.space_id == space_id and item.extension_id == extension_id
                 ),
                 key=lambda item: (item.order, item.pack_id),
             )

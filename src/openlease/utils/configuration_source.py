@@ -48,9 +48,7 @@ class ConfigurationSourceReader:
                     f"configuration source is unavailable: {path}"
                 ) from error
             if not path.is_file():
-                raise ConfigurationError(
-                    f"configuration source is not a file: {path}"
-                )
+                raise ConfigurationError(f"configuration source is not a file: {path}")
             if _identity(before) != _identity(after):
                 continue
             digest = sha256(content).hexdigest()

@@ -77,6 +77,6 @@ def atomic_write(path: Path, content: bytes) -> None:
 def _schema_version(source: bytes) -> object:
     try:
         document = json.loads(source.decode("utf-8"))
-    except (UnicodeError, json.JSONDecodeError):
+    except UnicodeError, json.JSONDecodeError:
         return None
     return document.get("schema_version") if isinstance(document, dict) else None
