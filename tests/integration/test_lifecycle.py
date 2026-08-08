@@ -3,8 +3,9 @@ from pathlib import Path
 
 import pytest
 
-from openlease import AuthorityConflict, OpenLease
+from openlease import AuthorityConflict, OpenLease, ReconcileSelection
 from openlease.core.graph import AccessRole
+from openlease.utils.git_adapter import IntegrationStrategy
 from openlease.utils.openspec_adapter import OpenSpecWorkset
 
 
@@ -48,7 +49,9 @@ class MemoryOpenSpec:
         del self.worksets[name]
 
 
-def _system(tmp_path: Path) -> tuple[OpenLease, dict[str, Path], MemoryOpenSpec]:
+def _system(
+    tmp_path: Path, *, verifier=None
+) -> tuple[OpenLease, dict[str, Path], MemoryOpenSpec]:
     repos = {
         name: _repository(tmp_path / name) for name in ("repo-1", "repo-2", "repo-3")
     }
@@ -57,6 +60,7 @@ def _system(tmp_path: Path) -> tuple[OpenLease, dict[str, Path], MemoryOpenSpec]
         tmp_path / "state",
         worktree_base=tmp_path / "worktrees",
         openspec=openspec,  # type: ignore[arg-type]
+        verifier=verifier,
     )
     for name, path in repos.items():
         system.register_repository(name, path)
@@ -143,3 +147,36 @@ def test_repeated_lock_is_a_compatible_noop(tmp_path: Path) -> None:
     assert first.data == second.data
     assert second.outcome == "compatible_noop"
     assert second.changed is False
+
+
+def test_reconciliation_verifies_each_repository_and_the_complete_cohort(
+    tmp_path: Path,
+) -> None:
+    verified: list[tuple[str, tuple[Path, ...]]] = []
+    system, repos, _ = _system(
+        tmp_path,
+        verifier=lambda scope, paths: verified.append((scope, paths)),
+    )
+    _space(system, "blocker", "a")
+    system.lock("blocker")
+    _space(system, "request", "a")
+    successor = system.defer("request", "successor").data
+    system.release("blocker")
+    system.set_handoff_disposition("blocker", "abandoned")
+    system.lock("successor")
+    generated = next(item for item in successor.members if item.generated)
+    worktree = Path(generated.effective_path)
+    (worktree / "change.txt").write_text("change", encoding="utf-8")
+    _git(worktree, "add", "change.txt")
+    _git(worktree, "commit", "--quiet", "-m", "change")
+    system.release("successor")
+    selection = ReconcileSelection(
+        "repo-1",
+        _git(repos["repo-1"], "branch", "--show-current"),
+        IntegrationStrategy.MERGE,
+    )
+
+    result = system.reconcile_apply("successor", (selection,))
+
+    assert result.data == {"completed": ["repo-1"]}
+    assert [scope for scope, _ in verified] == ["repo-1", "cohort"]

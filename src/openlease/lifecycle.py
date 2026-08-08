@@ -84,6 +84,7 @@ class OpenLease:
         worktree_base: Path | None = None,
         git: GitAdapter | None = None,
         openspec: OpenSpecAdapter | None = None,
+        verifier: Callable[[str, tuple[Path, ...]], None] | None = None,
     ) -> None:
         self.state_root = state_root.resolve()
         self.worktree_base = (
@@ -94,6 +95,7 @@ class OpenLease:
         self.repository = StateRepository(self.state_root)
         self.git = git or GitAdapter()
         self.openspec = openspec or OpenSpecAdapter()
+        self.verifier = verifier or self._verify_clean_checkouts
 
     def snapshot(self) -> OpenLeaseState:
         return self.repository.load()
@@ -215,6 +217,24 @@ class OpenLease:
 
         updated = self._mutate(transform)
         return CommandResult("create_space", data=self._space(updated, identifier))
+
+    def select_space(self, identifier: str) -> CommandResult:
+        state = self.snapshot()
+        self._space(state, identifier)
+        return CommandResult(
+            "select_space",
+            changed=False,
+            data={"space": identifier, "environment": {"OPENLEASE_SPACE": identifier}},
+        )
+
+    def close_session(self, identifier: str) -> CommandResult:
+        state = self.snapshot()
+        self._space(state, identifier)
+        return CommandResult(
+            "close_session",
+            changed=False,
+            data={"space": identifier, "unset_environment": "OPENLEASE_SPACE"},
+        )
 
     def associate(
         self,
@@ -564,7 +584,14 @@ class OpenLease:
         return CommandResult(
             "reconcile_plan",
             changed=False,
-            data={"default_order": default_order, "legs": tuple(previews)},
+            data={
+                "default_order": default_order,
+                "legs": tuple(previews),
+                "verification": {
+                    "repository": "configured verifier after each completed leg",
+                    "cohort": "configured verifier after every selected leg",
+                },
+            },
         )
 
     def reconcile_apply(
@@ -589,16 +616,31 @@ class OpenLease:
                     source_checkout=Path(member.effective_path),
                 )
             )
-            result = self.git.apply_integration(
-                MergeLeg(
-                    destination_path,
-                    member.branch or "",
-                    selection.destination_ref,
-                    selection.strategy,
-                    source_checkout=Path(member.effective_path),
-                    expected_destination_commit=preview.destination_commit,
+            try:
+                result = self.git.apply_integration(
+                    MergeLeg(
+                        destination_path,
+                        member.branch or "",
+                        selection.destination_ref,
+                        selection.strategy,
+                        source_checkout=Path(member.effective_path),
+                        expected_destination_commit=preview.destination_commit,
+                    )
                 )
-            )
+            except Exception as error:
+                raise InvalidRequest(
+                    f"reconciliation stopped at {repository_id}",
+                    details={
+                        "completed": tuple(completed),
+                        "conflicted": repository_id,
+                        "remaining": tuple(
+                            item
+                            for item in plan.data["default_order"]  # type: ignore[index]
+                            if item not in completed and item != repository_id
+                        ),
+                    },
+                ) from error
+            self.verifier(repository_id, (destination_path,))
 
             def transform(
                 current: OpenLeaseState,
@@ -626,6 +668,12 @@ class OpenLease:
             current = self.snapshot()
             self.repository.mutate(current.generation, transform)
             completed.append(repository_id)
+        destination_paths = tuple(
+            selection_by_repo[repository_id].destination_path
+            or Path(members[repository_id].source_path)
+            for repository_id in completed
+        )
+        self.verifier("cohort", destination_paths)
         return CommandResult("reconcile_apply", data={"completed": completed})
 
     def abandon_member(self, space_id: str, repository_id: str) -> CommandResult:
@@ -813,6 +861,7 @@ class OpenLease:
             except InvalidRequest as error:
                 data["affected_plan"] = None
                 data["planning_issue"] = str(error)
+            data["member_status"] = self._member_status(space)
         return CommandResult("status", changed=False, data=data)
 
     def resolve_authority(self, checkout_path: Path, relative_path: str) -> str | None:
@@ -887,6 +936,24 @@ class OpenLease:
             successor_name,
             self.worktree_base / successor_name,
         )
+        requests = {
+            item.repository_id: self._worktree_request(
+                item,
+                successor_name,
+                branches.get(item.repository_id, BranchSelection()),
+            )
+            for item in preparation.generated
+        }
+        collisions = tuple(
+            str(request.destination)
+            for request in requests.values()
+            if request.destination.exists() or request.destination.is_symlink()
+        )
+        if collisions:
+            raise PreparationFailed(
+                "successor preparation preflight found unavailable destinations",
+                details={"collisions": collisions},
+            )
         blocker_ids = tuple(sorted({item.owner_id for item in conflicts}))
         preparing = SpaceRecord(
             successor_name,
@@ -906,8 +973,7 @@ class OpenLease:
         generated_members: list[SpaceMemberRecord] = []
         try:
             for item in preparation.generated:
-                selection = branches.get(item.repository_id, BranchSelection())
-                request = self._worktree_request(item, successor_name, selection)
+                request = requests[item.repository_id]
                 created = self.git.create_worktree(
                     self.git.inspect(item.source_path), request
                 )
@@ -1116,9 +1182,64 @@ class OpenLease:
                             f"{blocker_id}/{repository_id}"
                         )
         for member in space.members:
-            if member.generated and self.git.inspect(Path(member.effective_path)).dirty:
+            checkout = self.git.inspect(Path(member.effective_path))
+            if member.generated and checkout.dirty:
                 issues.append(f"deferred member is dirty: {member.repository_id}")
+            if not member.generated and checkout.head != member.starting_commit:
+                issues.append(f"pinned member drifted: {member.repository_id}")
         return tuple(issues)
+
+    def _verify_clean_checkouts(self, scope: str, paths: tuple[Path, ...]) -> None:
+        dirty = tuple(
+            str(checkout.root)
+            for checkout in (self.git.inspect(path) for path in paths)
+            if checkout.dirty
+        )
+        if dirty:
+            raise InvalidRequest(
+                f"{scope} verification found dirty integration destinations",
+                details={"dirty": dirty},
+            )
+
+    def _member_status(self, space: SpaceRecord) -> tuple[dict[str, object], ...]:
+        results: list[dict[str, object]] = []
+        for member in space.members:
+            try:
+                checkout = self.git.inspect(Path(member.effective_path))
+                preview = (
+                    self.git.preview_integration(
+                        MergeLeg(
+                            checkout.root,
+                            member.branch,
+                            member.starting_commit,
+                            IntegrationStrategy.MERGE,
+                        )
+                    )
+                    if member.branch is not None
+                    else None
+                )
+                results.append(
+                    {
+                        "repository_id": member.repository_id,
+                        "path": checkout.root,
+                        "missing": False,
+                        "dirty": checkout.dirty,
+                        "current_head": checkout.head,
+                        "starting_commit": member.starting_commit,
+                        "ahead": preview.ahead if preview is not None else None,
+                        "behind": preview.behind if preview is not None else None,
+                    }
+                )
+            except Exception as error:
+                results.append(
+                    {
+                        "repository_id": member.repository_id,
+                        "path": member.effective_path,
+                        "missing": True,
+                        "error": str(error),
+                    }
+                )
+        return tuple(results)
 
     def _canonical_members(
         self, state: OpenLeaseState, space: SpaceRecord, plan

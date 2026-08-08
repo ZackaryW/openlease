@@ -112,6 +112,7 @@ dev = [
     { name = "behave" },
     { name = "pytest" },
     { name = "ruff" },
+    { name = "typer" },
 ]
 
 [package.metadata]
@@ -126,6 +127,7 @@ dev = [
     { name = "behave", specifier = ">=1.3.3" },
     { name = "pytest", specifier = ">=9.0.0" },
     { name = "ruff", specifier = ">=0.12.0" },
+    { name = "typer", specifier = ">=0.27.0" },
 ]
 
 [[package]]

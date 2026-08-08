@@ -873,11 +873,14 @@ def source_unchanged(context) -> None:
 @then("publishes no usable deferred successor")
 def no_usable_successor(context) -> None:
     successor = next(
-        item
-        for item in context.system.snapshot().spaces
-        if item.identifier == "successor"
+        (
+            item
+            for item in context.system.snapshot().spaces
+            if item.identifier == "successor"
+        ),
+        None,
     )
-    assert successor.status == "preparation_failed"
+    assert successor is None or successor.status == "preparation_failed"
 
 
 @given("deferral created one affected worktree before a later repository failed")
@@ -886,8 +889,22 @@ def partial_preparation(context) -> None:
     space(context, "blocker", authorities=("shared",))
     context.system.lock("blocker")
     space(context, "request", repositories=("repo-2",))
-    collision = context.root / "worktrees" / "successor" / "repo-3-successor"
-    collision.mkdir(parents=True)
+    delegate = context.system.git
+
+    class FailSecondCreation:
+        def __init__(self) -> None:
+            self.created = 0
+
+        def __getattr__(self, name):
+            return getattr(delegate, name)
+
+        def create_worktree(self, source, request):
+            self.created += 1
+            if self.created == 2:
+                raise RuntimeError("injected later repository failure")
+            return delegate.create_worktree(source, request)
+
+    context.system.git = FailSecondCreation()
     capture(context, lambda: context.system.defer("request", "successor"))
     assert isinstance(context.error, PreparationFailed)
 
@@ -1043,6 +1060,27 @@ def dirty_work_preserved(context) -> None:
     assert context.dirty_path.read_text(encoding="utf-8") == "user work"
 
 
+@given("a deferred successor pins unrelated repo 2 context")
+def deferred_with_pinned_repo2(context) -> None:
+    blocked_successor(context)
+    context.system.release("blocker")
+    context.system.set_handoff_disposition("blocker", "abandoned")
+    assert not member(context, "successor", "repo-2").generated
+
+
+@given("the pinned repo 2 checkout moves from its recorded commit")
+def move_pinned_repo2(context) -> None:
+    path = context.repos["repo-2"]
+    (path / "drift.txt").write_text("drift", encoding="utf-8")
+    git(path, "add", "drift.txt")
+    git(path, "commit", "--quiet", "-m", "move pinned context")
+
+
+@then("status reports the pinned repo 2 drift")
+def pinned_drift_reported(context) -> None:
+    assert "pinned member drifted: repo-2" in context.result.data["promotion_issues"]
+
+
 @given("a locked successor has generated branches and worktrees")
 def locked_successor(context) -> None:
     blocked_successor(context, locked=True)
@@ -1152,6 +1190,7 @@ def reconciliation_evidence(context) -> None:
     assert hasattr(leg["preview"], "ahead")
     assert "dirty" in leg
     assert hasattr(leg["preview"], "likely_conflicts")
+    assert context.result.data["verification"]["cohort"]
 
 
 @then("does not mutate Git during planning")

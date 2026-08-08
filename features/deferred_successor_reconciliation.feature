@@ -78,6 +78,13 @@ Feature: Defer and reconcile affected branch cohorts
     Then OpenLease identifies the dirty member and rejects promotion
     And preserves all work
 
+  Scenario: Refuse to promote drifted pinned context
+    Given a deferred successor pins unrelated repo 2 context
+    And the pinned repo 2 checkout moves from its recorded commit
+    When the deferred successor runs lockable
+    Then promotion remains unavailable
+    And status reports the pinned repo 2 drift
+
   Scenario: Release generated work into reconciliation debt
     Given a locked successor has generated branches and worktrees
     When the owner releases it

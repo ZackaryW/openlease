@@ -20,11 +20,15 @@ relate_app = typer.Typer(help="Declare topology relationships.")
 space_app = typer.Typer(help="Manage durable spaces.")
 affect_app = typer.Typer(help="Manage a space's direct affected claim.")
 reconcile_app = typer.Typer(help="Plan and apply explicit integration paths.")
+session_app = typer.Typer(help="Select a durable space in terminal context.")
+preparation_app = typer.Typer(help="Inspect and recover failed successor preparation.")
 app.add_typer(register_app, name="register")
 app.add_typer(relate_app, name="relate")
 app.add_typer(space_app, name="space")
 app.add_typer(affect_app, name="affect")
 app.add_typer(reconcile_app, name="reconcile")
+app.add_typer(session_app, name="session")
+app.add_typer(preparation_app, name="preparation")
 
 
 @dataclass(slots=True)
@@ -145,6 +149,27 @@ def create_space(ctx: typer.Context, identifier: str) -> None:
     _run(context, lambda: context.lifecycle.create_space(identifier))
 
 
+@session_app.command("start")
+def session_start(ctx: typer.Context, identifier: str) -> None:
+    context = _context(ctx)
+    _run(context, lambda: context.lifecycle.create_space(identifier))
+
+
+@session_app.command("attach")
+def session_attach(ctx: typer.Context, identifier: str) -> None:
+    context = _context(ctx)
+    _run(context, lambda: context.lifecycle.select_space(identifier))
+
+
+@session_app.command("close")
+def session_close(
+    ctx: typer.Context,
+    space: Annotated[str | None, typer.Option("--space")] = None,
+) -> None:
+    context = _context(ctx)
+    _run(context, lambda: context.lifecycle.close_session(_space(context, space)))
+
+
 @space_app.command("associate")
 def associate(
     ctx: typer.Context,
@@ -158,6 +183,15 @@ def associate(
             _space(context, space), tuple(repositories)
         ),
     )
+
+
+@app.command("associate")
+def associate_alias(
+    ctx: typer.Context,
+    repositories: Annotated[list[str], typer.Argument(help="Repository IDs.")],
+    space: Annotated[str | None, typer.Option("--space")] = None,
+) -> None:
+    associate(ctx, repositories, space)
 
 
 @affect_app.command("add")
@@ -373,6 +407,76 @@ def finalize(
 ) -> None:
     context = _context(ctx)
     _run(context, lambda: context.lifecycle.finalize(_space(context, space)))
+
+
+@app.command("handoff")
+def handoff(
+    ctx: typer.Context,
+    disposition: Annotated[str, typer.Option("--disposition")],
+    space: Annotated[str | None, typer.Option("--space")] = None,
+) -> None:
+    if disposition not in {"integrated", "abandoned", "superseded"}:
+        raise typer.BadParameter(
+            "disposition must be integrated, abandoned, or superseded"
+        )
+    context = _context(ctx)
+    _run(
+        context,
+        lambda: context.lifecycle.set_handoff_disposition(
+            _space(context, space),
+            disposition,  # type: ignore[arg-type]
+        ),
+    )
+
+
+@app.command("abandon")
+def abandon(
+    ctx: typer.Context,
+    repository: Annotated[str, typer.Option("--repository")],
+    space: Annotated[str | None, typer.Option("--space")] = None,
+) -> None:
+    context = _context(ctx)
+    _run(
+        context,
+        lambda: context.lifecycle.abandon_member(_space(context, space), repository),
+    )
+
+
+@app.command("cleanup")
+def cleanup(
+    ctx: typer.Context,
+    repository: Annotated[str, typer.Option("--repository")],
+    space: Annotated[str | None, typer.Option("--space")] = None,
+) -> None:
+    context = _context(ctx)
+    _run(
+        context,
+        lambda: context.lifecycle.cleanup_worktree(_space(context, space), repository),
+    )
+
+
+@preparation_app.command("resume")
+def preparation_resume(
+    ctx: typer.Context,
+    space: Annotated[str | None, typer.Option("--space")] = None,
+) -> None:
+    context = _context(ctx)
+    _run(
+        context,
+        lambda: context.lifecycle.resume_preparation(_space(context, space)),
+    )
+
+
+@preparation_app.command("rollback")
+def preparation_rollback(
+    ctx: typer.Context,
+    space: Annotated[str | None, typer.Option("--space")] = None,
+) -> None:
+    context = _context(ctx)
+    _run(
+        context,
+        lambda: context.lifecycle.rollback_preparation(_space(context, space)),
+    )
 
 
 def main() -> None:
