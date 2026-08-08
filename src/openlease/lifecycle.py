@@ -52,6 +52,7 @@ from openlease.core.state_codec import (
     SpaceMemberRecord,
     SpacePackAttachmentRecord,
     SpaceRecord,
+    structural_key,
 )
 from openlease.errors import (
     AuthorityConflict,
@@ -64,6 +65,7 @@ from openlease.extension import (
     ExtensionAuthority,
     ExtensionContext,
     ExtensionMember,
+    ExtensionPack,
     ExtensionRegistration,
     ExtensionRelationship,
     ExtensionResolution,
@@ -1905,12 +1907,43 @@ class OpenLease:
             )
             for item in state.dependencies
         )
+        attachments = tuple(
+            sorted(
+                (
+                    item
+                    for item in state.space_pack_attachments
+                    if item.space_id == space_id
+                    and item.extension_id == extension_id
+                ),
+                key=lambda item: (item.order, item.pack_id),
+            )
+        )
+        packs = tuple(
+            ExtensionPack(
+                identifier=item.pack_id,
+                order=item.order,
+                observed_generation=structural_key(
+                    {
+                        "pack": item.pack_id,
+                        "order": item.order,
+                        "documents": tuple(
+                            document.observed_generation
+                            for document in documents
+                            if document.scope_kind == "pack"
+                            and document.scope_id == item.pack_id
+                        ),
+                    }
+                ),
+            )
+            for item in attachments
+        )
         return ExtensionContext(
             extension_id=extension_id,
             space_id=space_id,
             target=target,
             state_generation=state.generation,
             configuration_generation=state.configuration_generation,
+            packs=packs,
             members=tuple(members),
             authorities=authorities,
             relationships=relationships,

@@ -178,6 +178,8 @@ def then_child_b_excluded(context) -> None:
 def then_documents_are_opaque(context) -> None:
     for item in context.result.data.context.documents:
         assert item.content == item.identifier.encode()
+        assert item.source_kind.value == "external"
+        assert item.repository_id is None
 
 
 @given(
@@ -212,6 +214,17 @@ def when_attach_pack_and_resolve_children(context) -> None:
 def then_pack_in_both(context) -> None:
     assert "pack" in {item.identifier for item in context.a.data.context.documents}
     assert "pack" in {item.identifier for item in context.b.data.context.documents}
+
+
+@then(
+    "each resolved context identifies the participating pack and its observed generation"
+)
+def then_pack_generation(context) -> None:
+    for result in (context.a, context.b):
+        assert len(result.data.context.packs) == 1
+        pack = result.data.context.packs[0]
+        assert pack.identifier == "shared"
+        assert pack.observed_generation
 
 
 @then("no configuration scope or pack becomes a child space or leased authority")

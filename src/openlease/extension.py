@@ -49,12 +49,20 @@ class ExtensionRelationship:
 
 
 @dataclass(frozen=True, slots=True)
+class ExtensionPack:
+    identifier: str
+    order: int
+    observed_generation: str
+
+
+@dataclass(frozen=True, slots=True)
 class ExtensionContext:
     extension_id: str
     space_id: str
     target: ConfigurationTarget
     state_generation: int
     configuration_generation: int
+    packs: tuple[ExtensionPack, ...]
     members: tuple[ExtensionMember, ...]
     authorities: tuple[ExtensionAuthority, ...]
     relationships: tuple[ExtensionRelationship, ...]
