@@ -1,0 +1,1 @@
+"""Pure OpenLease domain utilities."""

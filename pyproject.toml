@@ -1,0 +1,42 @@
+[project]
+name = "openlease"
+version = "0.1.0"
+description = "Coordinate relational OpenSpec work through machine-local authority leases"
+readme = "README.md"
+authors = [
+    { name = "ZackaryW", email = "gitzackw@gmail.com" }
+]
+requires-python = ">=3.14"
+dependencies = [
+    "filelock>=3.19.1",
+]
+
+[project.urls]
+Repository = "https://github.com/ZackaryW/openlease"
+
+[project.optional-dependencies]
+cli = ["typer>=0.27.0"]
+
+[dependency-groups]
+dev = [
+    "behave>=1.3.3",
+    "pytest>=9.0.0",
+    "ruff>=0.12.0",
+]
+
+[project.scripts]
+openlease = "openlease.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.12.0,<0.13.0"]
+build-backend = "uv_build"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 88
+target-version = "py314"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]

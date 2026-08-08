@@ -45,4 +45,3 @@ Feature: Use OpenLease through one library-first lifecycle
     When both attempt a mutating lifecycle operation
     Then OpenLease serializes the mutations
     And only a process whose observed generation is current may commit its result
-

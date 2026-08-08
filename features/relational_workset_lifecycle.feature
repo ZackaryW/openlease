@@ -74,4 +74,3 @@ Feature: Build relational OpenLease spaces
     When a lifecycle operation would replace or remove that projection
     Then OpenLease reports an ownership conflict
     And preserves the modified projection and unrelated user worksets
-

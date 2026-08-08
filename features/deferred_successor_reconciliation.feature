@@ -118,4 +118,3 @@ Feature: Defer and reconcile affected branch cohorts
     When the owner explicitly force-recovers that space
     Then OpenLease releases only its owned machine-local leases and intact projection
     And preserves its branches, worktrees, dirty files, and reconciliation records
-

@@ -1,0 +1,1 @@
+"""Relational OpenSpec authority leasing."""

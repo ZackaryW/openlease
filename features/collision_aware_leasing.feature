@@ -68,4 +68,3 @@ Feature: Lease affected OpenSpec authorities without false collisions
     When the owner releases or reconciles the space
     Then OpenLease reports the child B path outside the held boundary
     And does not represent the cohort as collision-safe
-
