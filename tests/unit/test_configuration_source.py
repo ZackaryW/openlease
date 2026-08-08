@@ -2,7 +2,11 @@ from pathlib import Path
 
 import pytest
 
-from openlease.core.configuration import ConfigurationError, PlannedSource
+from openlease.core.configuration import (
+    ConfigurationError,
+    PlannedSource,
+    SourceKind,
+)
 from openlease.utils.configuration_source import ConfigurationSourceReader
 
 
@@ -28,6 +32,8 @@ def test_rereads_current_bytes_and_changes_the_observed_generation(
     second = reader.read(source)
 
     assert first.content == b"first"
+    assert first.source_kind is SourceKind.EXTERNAL
+    assert first.repository_id is None
     assert second.content == b"second"
     assert first.content_digest != second.content_digest
     assert first.observed_generation != second.observed_generation

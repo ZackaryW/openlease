@@ -3,7 +3,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from hashlib import sha256
 
-from openlease.core.configuration import ConfigurationError, PlannedSource
+from openlease.core.configuration import (
+    ConfigurationError,
+    PlannedSource,
+    SourceKind,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -15,6 +19,8 @@ class ConfigurationDocument:
     resolved_path: str
     order: int
     binding_revision: int
+    source_kind: SourceKind
+    repository_id: str | None
     content: bytes
     content_digest: str
     observed_generation: str
@@ -56,6 +62,8 @@ class ConfigurationSourceReader:
                 resolved_path=str(path),
                 order=source.order,
                 binding_revision=source.binding_revision,
+                source_kind=source.source_kind,
+                repository_id=source.repository_id,
                 content=content,
                 content_digest=digest,
                 observed_generation=observed_generation(

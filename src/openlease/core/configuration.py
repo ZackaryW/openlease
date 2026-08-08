@@ -91,6 +91,7 @@ class PlannedSource:
     repository_id: str | None
     order: int
     binding_revision: int
+    source_kind: SourceKind = SourceKind.EXTERNAL
 
 
 def resolve_extension_roots(
@@ -297,4 +298,5 @@ def _planned_source(
         repository_id=source.repository_id,
         order=source.order,
         binding_revision=source.revision,
+        source_kind=SourceKind(source.source_kind),
     )
