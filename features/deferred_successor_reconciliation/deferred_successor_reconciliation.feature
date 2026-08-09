@@ -126,6 +126,13 @@ Feature: Defer and reconcile affected branch cohorts
     Then no registered or configured extension operation becomes required work
     And intrinsic OpenLease Git and ownership checks remain active
 
+  Scenario: Plan an explicit ZPP verification input
+    Given a released successor and a selected reconciliation callback
+    When the owner supplies the callback input command bdd with complete enabled
+    Then the read-only plan reports the captured input
+    And callback drift evidence covers that input
+    And extension configuration does not select or alter the command
+
   Scenario: Stop before Git on an explicitly selected gate
     Given a released successor and a registered failing pre-repository callback
     When the owner selects that callback as a gate and applies reconciliation
@@ -142,6 +149,23 @@ Feature: Defer and reconcile affected branch cohorts
     Given a released successor and a registered post-repository callback
     When the owner selects that callback as a gate while planning
     Then OpenLease rejects the unsupported mode before Git mutation
+
+  Scenario: Dispatch cohort verification through isolated repository contexts
+    Given repo 3 and repo 2 complete reconciliation in dependency order
+    And one observational after-cohort callback is selected with explicit input
+    When OpenLease dispatches the completed cohort callback
+    Then repo 3 receives one invocation bound only to repo 3
+    And repo 2 receives one invocation bound only to repo 2
+    And both events identify the cohort and their repository
+    And both invocations receive the same captured input
+
+  Scenario: Continue isolated cohort verification after one failure
+    Given repo 3 and repo 2 completed reconciliation
+    And the selected after-cohort callback fails for repo 3
+    When OpenLease dispatches the completed cohort callback
+    Then repo 2 still receives its repository-specific invocation
+    And both repository-specific outcomes are reported in reconciliation order
+    And every ordinary reconciliation result remains unchanged
 
   Scenario: Default the visible plan order from provider to consumer
     Given repo 2 depends on the affected authority hosted by repo 3

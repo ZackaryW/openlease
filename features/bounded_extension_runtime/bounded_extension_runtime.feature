@@ -3,17 +3,28 @@ Feature: Invoke explicitly registered bounded extensions
   OpenLease provides narrow managed configuration and storage without making
   registration or configuration an execution or lifecycle authority.
 
-  Scenario: Version-three registration is inert
-    Given two version-three extensions declare named operations
+  Scenario: Version-four registration is inert
+    Given two version-four extensions declare named operations
     When the host constructs the bounded runtime
     Then both exact identities are registered
     And no validator operation callback managed write or lifecycle action runs
 
-  Scenario: Reject a version-two registration
-    Given a version-two extension declares a named operation
+  Scenario: Reject a version-three registration
+    Given a version-three extension declares a named operation
     When the host attempts to construct the bounded runtime
-    Then registration fails with version-three guidance
+    Then registration fails with version-four guidance
     And no extension code or managed write runs
+
+  Scenario: Capture explicit callback input immutably
+    Given a version-four callback selection with a mutable ZPP verification input
+    When the owner changes the original input after selection
+    Then the selected callback retains the original managed input
+    And the callback operation receives that exact captured input
+
+  Scenario: Reject unsupported callback input
+    Given a version-four callback selection with a non-managed input value
+    When the host attempts to select the callback
+    Then selection fails before planning or extension invocation
 
   Scenario: Configuration presence does not activate an operation
     Given a registered operation and configuration that names a runner
