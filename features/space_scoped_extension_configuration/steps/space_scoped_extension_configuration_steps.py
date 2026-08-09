@@ -227,6 +227,22 @@ def given_competing_handles(context) -> None:
     assert context.first.config["key"] == context.second.config["key"] == "old"
 
 
+@given("two handles observe one writable configuration without the new key")
+def given_competing_absent_handles(context) -> None:
+    current_system(context, "extension")
+    context.source = context.root / "config.json"
+    context.source.write_text("{}", encoding="utf-8")
+    options = dict(codec="json", layout="dedicated", writable=True)
+    context.first = context.system.bind_extension_document(
+        "extension", context.source, **options
+    )
+    context.second = context.system.bind_extension_document(
+        "extension", context.source, **options
+    )
+    assert "key" not in context.first.config
+    assert "key" not in context.second.config
+
+
 @when("both handles assign different replacements")
 def when_competing_assignments(context) -> None:
     context.first.config["key"] = "first"
@@ -241,6 +257,44 @@ def then_conflict(context) -> None:
 @then("the first replacement remains authoritative")
 def then_first_remains(context) -> None:
     assert json.loads(context.source.read_text(encoding="utf-8"))["key"] == "first"
+
+
+@given("a writable document is bound before its path becomes an escaping symlink")
+def given_replaced_symlink_binding(context) -> None:
+    current_system(context, "extension")
+    context.source = context.root / "config.json"
+    context.external = context.root / "external.json"
+    context.source.write_text('{"key": "bound"}', encoding="utf-8")
+    context.external.write_text('{"key": "bound"}', encoding="utf-8")
+    context.bound = context.system.bind_extension_document(
+        "extension",
+        context.source,
+        codec="json",
+        layout="dedicated",
+        writable=True,
+    )
+    context.source.unlink()
+    try:
+        context.source.symlink_to(context.external)
+    except OSError as error:
+        context.scenario.skip(f"file symbolic links are unavailable: {error}")
+
+
+@when("the caller assigns through the replaced binding")
+def when_assigning_through_replaced_binding(context) -> None:
+    capture(context, lambda: context.bound.config.__setitem__("key", "escaped"))
+
+
+@then("the configuration mutation reports a path-change error")
+def then_path_change_reported(context) -> None:
+    assert isinstance(context.error, InvalidRequest)
+    assert "configuration source path changed" in str(context.error)
+
+
+@then("the symlink and its external target remain unchanged")
+def then_symlink_target_unchanged(context) -> None:
+    assert context.source.is_symlink()
+    assert json.loads(context.external.read_text(encoding="utf-8")) == {"key": "bound"}
 
 
 @given("a direct dedicated document contains a nested mapping")

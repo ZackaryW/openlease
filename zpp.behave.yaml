@@ -5,6 +5,28 @@ commands:
       kind: argv
       argv: [uv, run, python, scripts/run_behave_roots.py, "{targets}"]
     targets:
+      bounded-extension-runtime:
+        value: features/bounded_extension_runtime
+        paths:
+          - features/bounded_extension_runtime/**
+          - features/support/**
+          - features/__init__.py
+          - scripts/run_behave_roots.py
+          - behave.ini
+          - pyproject.toml
+          - uv.lock
+          - zpp.behave.yaml
+          - src/openlease/__init__.py
+          - src/openlease/configuration_codec.py
+          - src/openlease/errors.py
+          - src/openlease/extension.py
+          - src/openlease/extension_runtime.py
+          - src/openlease/lifecycle.py
+          - src/openlease/result.py
+          - src/openlease/core/configuration.py
+          - src/openlease/core/state_codec.py
+          - src/openlease/utils/configuration_source.py
+          - src/openlease/utils/state_repository.py
       relational-workset-lifecycle:
         value: features/relational_workset_lifecycle
         paths:
@@ -100,8 +122,10 @@ commands:
           - uv.lock
           - zpp.behave.yaml
           - src/openlease/__init__.py
+          - src/openlease/configuration_codec.py
           - src/openlease/errors.py
           - src/openlease/extension.py
+          - src/openlease/extension_runtime.py
           - src/openlease/lifecycle.py
           - src/openlease/result.py
           - src/openlease/core/configuration.py
@@ -115,6 +139,9 @@ commands:
       kind: argv
       argv: [uv, run, python, scripts/run_behave_roots.py, "{targets}"]
     targets:
+      bounded-extension-runtime:
+        value: features/bounded_extension_runtime
+        paths: ["**"]
       relational-workset-lifecycle:
         value: features/relational_workset_lifecycle
         paths: ["**"]

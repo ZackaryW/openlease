@@ -106,6 +106,48 @@ def test_shared_document_preserves_other_extension_and_detects_same_key_conflict
     assert "keep" in rendered
 
 
+def test_same_key_conflict_is_detected_when_both_baselines_are_absent(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "config.json"
+    source.write_text("{}", encoding="utf-8")
+    system = OpenLease(tmp_path / "state", extensions=(registration("extension"),))
+    options = dict(codec="json", layout="dedicated", writable=True)
+    first = system.bind_extension_document("extension", source, **options)
+    second = system.bind_extension_document("extension", source, **options)
+
+    first.config["new-key"] = "first"
+    with pytest.raises(ConfigurationConflict):
+        second.config["new-key"] = "second"
+
+    assert json.loads(source.read_text(encoding="utf-8")) == {"new-key": "first"}
+
+
+def test_writable_binding_rejects_a_replaced_symlink_without_touching_target(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "config.json"
+    external = tmp_path / "external.json"
+    source.write_text('{"key": "bound"}', encoding="utf-8")
+    external.write_text('{"key": "bound"}', encoding="utf-8")
+    system = OpenLease(tmp_path / "state", extensions=(registration("extension"),))
+    bound = system.bind_extension_document(
+        "extension", source, codec="json", layout="dedicated", writable=True
+    )
+
+    source.unlink()
+    try:
+        source.symlink_to(external)
+    except OSError as error:
+        pytest.skip(f"file symbolic links are unavailable: {error}")
+
+    with pytest.raises(InvalidRequest, match="configuration source path changed"):
+        bound.config["key"] = "escaped"
+
+    assert source.is_symlink()
+    assert json.loads(external.read_text(encoding="utf-8")) == {"key": "bound"}
+
+
 def test_unrelated_shared_namespace_changes_rebase(tmp_path: Path) -> None:
     source = tmp_path / "shared.json"
     source.write_text(

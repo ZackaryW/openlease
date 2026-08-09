@@ -140,7 +140,7 @@ class ManagedConfiguration(MutableMapping[str, ManagedValue]):
         self._publisher = publisher
         self._validator = validator
         self._candidate_validator = candidate_validator
-        self._baselines: dict[str, object] = {}
+        self._baseline_selected: dict[str, ManagedValue] | None = None
         self._writes: list[WriteDisposition] = []
         self.last_write: WriteDisposition | None = None
 
@@ -176,8 +176,9 @@ class ManagedConfiguration(MutableMapping[str, ManagedValue]):
         )
         if source is None:
             return
-        for key, value in source.selected.items():
-            self._baselines[key] = plain_managed_value(value)
+        self._baseline_selected = {
+            key: plain_managed_value(value) for key, value in source.selected.items()
+        }
 
     def __getitem__(self, key: str) -> ManagedValue:
         value = self.snapshot()[key]
@@ -210,33 +211,24 @@ class ManagedConfiguration(MutableMapping[str, ManagedValue]):
                 validate_managed_value(value)
             except CodecError as error:
                 raise InvalidRequest(str(error)) from error
-        if key not in self._baselines:
-            snapshot = self.snapshot_record()
-            source = next(
-                item
-                for item in snapshot.bindings
-                if item.identifier == self._writable.identifier
-            )
-            self._baselines[key] = plain_managed_value(
-                source.selected.get(key, _MISSING)
-            )
+        if self._baseline_selected is None:
+            self.snapshot_record()
+        baseline = (
+            self._baseline_selected.get(key, _MISSING)
+            if self._baseline_selected is not None
+            else _MISSING
+        )
         disposition = self._publisher.mutate(
             self._writable,
             key,
             value,
-            baseline=self._baselines.get(key, _MISSING),
+            baseline=baseline,
             delete=delete,
             validator=self._candidate_validator,
         )
         self.last_write = disposition
         self._writes.append(disposition)
-        refreshed = self.snapshot_record()
-        source = next(
-            item
-            for item in refreshed.bindings
-            if item.identifier == self._writable.identifier
-        )
-        self._baselines[key] = plain_managed_value(source.selected.get(key, _MISSING))
+        self.snapshot_record()
 
     def writes_since(self, offset: int) -> tuple[WriteDisposition, ...]:
         return tuple(self._writes[offset:])
@@ -261,13 +253,11 @@ class ConfigurationPublisher:
         delete: bool,
         validator: Callable[[RuntimeBinding, Mapping[str, ManagedValue]], None] | None,
     ) -> WriteDisposition:
-        canonical = binding.path.resolve(strict=True)
-        if not canonical.is_file():
-            raise InvalidRequest(f"configuration source is not a file: {canonical}")
+        canonical = _require_bound_file(binding.path)
         lock_path = self._lock_path(canonical)
         lock_path.parent.mkdir(parents=True, exist_ok=True)
         with FileLock(str(lock_path)):
-            content = canonical.read_bytes()
+            canonical, content = _stable_read(binding.path, attempts=3)
             prior_digest = sha256(content).hexdigest()
             codec = self.codecs.require(binding.codec)
             document = codec.decode(content)
@@ -307,7 +297,8 @@ class ConfigurationPublisher:
             )
             rendered = codec.encode(document)
             resulting_digest = sha256(rendered).hexdigest()
-            _atomic_replace(canonical, rendered)
+            _require_bound_file(binding.path)
+            _atomic_replace(binding.path, rendered)
         return WriteDisposition(
             WriteDispositionKind.COMMITTED,
             "configuration",
@@ -770,10 +761,7 @@ class ManagedBatch:
 
 
 def _stable_read(path: Path, *, attempts: int) -> tuple[Path, bytes]:
-    try:
-        canonical = path.resolve(strict=True)
-    except OSError as error:
-        raise InvalidRequest(f"configuration source is unavailable: {path}") from error
+    canonical = _require_bound_file(path)
     for _attempt in range(attempts):
         try:
             before = canonical.stat()
@@ -788,10 +776,26 @@ def _stable_read(path: Path, *, attempts: int) -> tuple[Path, bytes]:
             return (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns)
 
         if identity(before) == identity(after):
-            if not canonical.is_file():
-                break
+            _require_bound_file(canonical)
             return canonical, content
     raise InvalidRequest(f"configuration source changed repeatedly: {canonical}")
+
+
+def _require_bound_file(path: Path) -> Path:
+    expected = path.absolute()
+    try:
+        resolved = expected.resolve(strict=True)
+    except (OSError, RuntimeError) as error:
+        raise InvalidRequest(
+            f"configuration source is unavailable: {expected}"
+        ) from error
+    if resolved != expected or expected.is_symlink():
+        raise InvalidRequest(
+            f"configuration source path changed after binding: {expected}"
+        )
+    if not expected.is_file():
+        raise InvalidRequest(f"configuration source is not a file: {expected}")
+    return expected
 
 
 def _same_value(left: object, right: object) -> bool:

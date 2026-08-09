@@ -44,6 +44,18 @@ Feature: Manage explicit extension configuration documents
     Then the second assignment reports a configuration conflict
     And the first replacement remains authoritative
 
+  Scenario: Reject a same-key conflict whose baseline was absent
+    Given two handles observe one writable configuration without the new key
+    When both handles assign different replacements
+    Then the second assignment reports a configuration conflict
+    And the first replacement remains authoritative
+
+  Scenario: Reject a writable path replaced by an escaping symlink
+    Given a writable document is bound before its path becomes an escaping symlink
+    When the caller assigns through the replaced binding
+    Then the configuration mutation reports a path-change error
+    And the symlink and its external target remain unchanged
+
   Scenario: Keep nested reads defensive
     Given a direct dedicated document contains a nested mapping
     When a caller attempts in-place mutation of the returned nested value
