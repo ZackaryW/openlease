@@ -1,6 +1,6 @@
 [project]
 name = "openlease"
-version = "0.1.0"
+version = "0.2.0"
 description = "Coordinate relational OpenSpec work through machine-local authority leases"
 readme = "README.md"
 authors = [
