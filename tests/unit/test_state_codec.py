@@ -1,3 +1,6 @@
+from datetime import UTC, date, datetime, time
+from types import MappingProxyType
+
 import pytest
 
 from openlease.core.state_codec import (
@@ -122,3 +125,35 @@ def test_structural_keys_are_canonical_for_equivalent_values() -> None:
     assert structural_key({"b": (2, 3), "a": 1}) == structural_key(
         {"a": 1, "b": [2, 3]}
     )
+
+
+def test_structural_keys_accept_frozen_managed_containers() -> None:
+    frozen = MappingProxyType(
+        {
+            "input": MappingProxyType({"command": "bdd", "complete": True}),
+            "targets": ("repo-3", "repo-2"),
+        }
+    )
+    mutable = {
+        "input": {"command": "bdd", "complete": True},
+        "targets": ["repo-3", "repo-2"],
+    }
+
+    assert structural_key(frozen) == structural_key(mutable)
+
+
+def test_structural_keys_canonically_tag_temporal_managed_scalars() -> None:
+    value = {
+        "date": date(2026, 8, 9),
+        "time": time(12, 34, 56),
+        "datetime": datetime(2026, 8, 9, 12, 34, 56, tzinfo=UTC),
+    }
+
+    assert structural_key(value) == structural_key(value.copy())
+    assert structural_key(date(2026, 8, 9)) != structural_key("2026-08-09")
+    assert structural_key(time(12, 34, 56)) != structural_key("12:34:56")
+
+
+def test_structural_keys_reject_arbitrary_objects() -> None:
+    with pytest.raises(TypeError, match="unsupported structural-key value"):
+        structural_key(object())

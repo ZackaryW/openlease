@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass
+from datetime import date, datetime, time
 from enum import Enum
 from hashlib import sha256
 from pathlib import Path
@@ -162,9 +164,17 @@ def structural_key(value: object) -> str:
             return normalize(item.value)
         if isinstance(item, Path):
             return item.as_posix()
-        if isinstance(item, dict):
+        if isinstance(item, datetime):
+            return {"$managed": "datetime", "value": item.isoformat()}
+        if isinstance(item, date):
+            return {"$managed": "date", "value": item.isoformat()}
+        if isinstance(item, time):
+            return {"$managed": "time", "value": item.isoformat()}
+        if isinstance(item, Mapping):
             return {str(key): normalize(child) for key, child in item.items()}
-        if isinstance(item, (tuple, list)):
+        if isinstance(item, Sequence) and not isinstance(
+            item, (str, bytes, bytearray)
+        ):
             return [normalize(child) for child in item]
         if item is None or isinstance(item, (str, int, float, bool)):
             return item
