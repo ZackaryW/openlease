@@ -772,6 +772,57 @@ def intrinsic_checks_remain(context) -> None:
     assert hasattr(leg["preview"], "likely_conflicts")
 
 
+@given("a released successor and a selected reconciliation callback")
+def given_selected_reconciliation_callback(context) -> None:
+    callback_successor(context, CallbackEvent.RECONCILE_AFTER_COHORT, fail=False)
+    context.callback_input = {"command": "bdd", "complete": True}
+    context.callback = CallbackSelection(
+        "zpp.behave",
+        "verify",
+        CallbackEvent.RECONCILE_AFTER_COHORT,
+        CallbackMode.OBSERVE,
+        input=context.callback_input,
+    )
+
+
+@when("the owner supplies the callback input command bdd with complete enabled")
+def plan_with_explicit_callback_input(context) -> None:
+    context.result = context.system.reconcile_plan(
+        "successor", context.selections, (context.callback,)
+    )
+
+
+@then("the read-only plan reports the captured input")
+def plan_reports_captured_input(context) -> None:
+    assert context.result.data["callbacks"][0]["input"] == {
+        "command": "bdd",
+        "complete": True,
+    }
+
+
+@then("callback drift evidence covers that input")
+def callback_evidence_covers_input(context) -> None:
+    changed = CallbackSelection(
+        "zpp.behave",
+        "verify",
+        CallbackEvent.RECONCILE_AFTER_COHORT,
+        CallbackMode.OBSERVE,
+        input={"command": "bdd", "complete": False},
+    )
+    changed_plan = context.system.reconcile_plan(
+        "successor", context.selections, (changed,)
+    )
+    assert (
+        changed_plan.data["callback_evidence"]
+        != context.result.data["callback_evidence"]
+    )
+
+
+@then("extension configuration does not select or alter the command")
+def configuration_does_not_select_callback_input(context) -> None:
+    assert context.result.data["callbacks"][0]["input"]["command"] == "bdd"
+
+
 @given("a released successor and a registered failing pre-repository callback")
 def given_failing_pre_callback(context) -> None:
     callback_successor(context, CallbackEvent.RECONCILE_BEFORE_REPOSITORY, fail=True)
@@ -877,6 +928,144 @@ def plan_post_gate(context) -> None:
 def post_gate_rejected(context) -> None:
     assert isinstance(context.error, InvalidRequest)
     assert git(context.destination, "rev-parse", "HEAD") == context.destination_head
+
+
+def cohort_callback_successor(context) -> None:
+    context.cohort_invocations = []
+    context.fail_repository = None
+
+    def callback(invocation):
+        context.cohort_invocations.append(
+            {
+                "repository_id": invocation.event.repository_id,
+                "cohort_id": invocation.event.cohort_id,
+                "target": invocation.context.target.identifier,
+                "input": invocation.input,
+            }
+        )
+        if invocation.event.repository_id == context.fail_repository:
+            raise RuntimeError("repository callback failed")
+
+    registration = ExtensionRegistration(
+        ExtensionManifest("zpp.behave"),
+        operations=(ExtensionOperation("verify", callback),),
+        callbacks=(
+            ExtensionCallback(CallbackEvent.RECONCILE_AFTER_COHORT, "verify"),
+        ),
+    )
+    context.system = type(new_system(context))(
+        context.root / "state",
+        openspec=context.openspec,
+        extensions=(registration,),
+    )
+    released_with_change(context, external=True)
+    current = context.system.status("successor").data["spaces"][0]
+    context.selections = tuple(
+        ReconcileSelection(
+            item.repository_id,
+            git(Path(item.source_path), "branch", "--show-current"),
+            IntegrationStrategy.MERGE,
+        )
+        for item in current.members
+        if item.generated
+    )
+    plan = context.system.reconcile_plan("successor", context.selections)
+    assert plan.data["default_order"] == ("repo-3", "repo-2")
+    context.cohort_input = {"command": "bdd", "complete": True}
+
+
+@given("repo 3 and repo 2 complete reconciliation in dependency order")
+def given_cohort_in_dependency_order(context) -> None:
+    cohort_callback_successor(context)
+
+
+@given("repo 3 and repo 2 completed reconciliation")
+def given_completed_cohort(context) -> None:
+    cohort_callback_successor(context)
+
+
+@given("one observational after-cohort callback is selected with explicit input")
+def given_observational_cohort_callback(context) -> None:
+    context.cohort_callback = CallbackSelection(
+        "zpp.behave",
+        "verify",
+        CallbackEvent.RECONCILE_AFTER_COHORT,
+        CallbackMode.OBSERVE,
+        input=context.cohort_input,
+    )
+
+
+@given("the selected after-cohort callback fails for repo 3")
+def given_repo_three_callback_failure(context) -> None:
+    context.fail_repository = "repo-3"
+    given_observational_cohort_callback(context)
+
+
+@when("OpenLease dispatches the completed cohort callback")
+def dispatch_completed_cohort_callback(context) -> None:
+    context.result = context.system.reconcile_apply(
+        "successor", context.selections, (context.cohort_callback,)
+    )
+
+
+@then("repo 3 receives one invocation bound only to repo 3")
+def repo_three_isolated(context) -> None:
+    assert context.cohort_invocations[0]["repository_id"] == "repo-3"
+    assert context.cohort_invocations[0]["target"] == "repo-3"
+
+
+@then("repo 2 receives one invocation bound only to repo 2")
+def repo_two_isolated(context) -> None:
+    assert context.cohort_invocations[1]["repository_id"] == "repo-2"
+    assert context.cohort_invocations[1]["target"] == "repo-2"
+
+
+@then("both events identify the cohort and their repository")
+def cohort_events_identify_scope(context) -> None:
+    assert [item["cohort_id"] for item in context.cohort_invocations] == [
+        "successor",
+        "successor",
+    ]
+    assert [item["repository_id"] for item in context.cohort_invocations] == [
+        "repo-3",
+        "repo-2",
+    ]
+
+
+@then("both invocations receive the same captured input")
+def cohort_invocations_receive_input(context) -> None:
+    assert [item["input"] for item in context.cohort_invocations] == [
+        context.cohort_callback.input,
+        context.cohort_callback.input,
+    ]
+
+
+@then("repo 2 still receives its repository-specific invocation")
+def repo_two_runs_after_failure(context) -> None:
+    assert [item["repository_id"] for item in context.cohort_invocations] == [
+        "repo-3",
+        "repo-2",
+    ]
+
+
+@then("both repository-specific outcomes are reported in reconciliation order")
+def repository_outcomes_reported_in_order(context) -> None:
+    outcomes = context.result.data["callback_outcomes"]
+    assert [item.handler_status for item in outcomes] == [
+        HandlerStatus.FAILED,
+        HandlerStatus.COMPLETED,
+    ]
+    assert [item.target for item in outcomes] == ["repository:repo-3", "repository:repo-2"]
+
+
+@then("every ordinary reconciliation result remains unchanged")
+def ordinary_results_remain_reconciled(context) -> None:
+    records = [
+        item
+        for item in context.system.snapshot().reconciliations
+        if item.space_id == "successor"
+    ]
+    assert {item.status for item in records} == {"reconciled"}
 
 
 @given("repo 2 depends on the affected authority hosted by repo 3")

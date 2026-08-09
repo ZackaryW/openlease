@@ -82,7 +82,9 @@ commands:
           - uv.lock
           - zpp.behave.yaml
           - src/openlease/__init__.py
+          - src/openlease/configuration_codec.py
           - src/openlease/errors.py
+          - src/openlease/extension.py
           - src/openlease/lifecycle.py
           - src/openlease/result.py
           - src/openlease/core/graph.py

@@ -9,6 +9,8 @@ from openlease import (
     BoundExtension,
     CallbackEvent,
     CallbackMode,
+    CallbackSelection,
+    CodecError,
     ConfigurationLayout,
     ExtensionCallback,
     ExtensionDocumentBinding,
@@ -84,24 +86,56 @@ def test_registration_rejects_invalid_current_contract(
 
 
 def test_contract_version_is_a_clean_break() -> None:
-    assert EXTENSION_CONTRACT_VERSION == 3
+    assert EXTENSION_CONTRACT_VERSION == 4
     with pytest.raises(TypeError):
         ExtensionRegistration(  # type: ignore[call-arg]
             ExtensionManifest("former"), resolver=lambda context: context
         )
 
 
-def test_version_two_registration_is_rejected_with_current_guidance(tmp_path) -> None:
-    registration = ExtensionRegistration(ExtensionManifest("former", 2))
+def test_version_three_registration_is_rejected_with_current_guidance(tmp_path) -> None:
+    registration = ExtensionRegistration(ExtensionManifest("former", 3))
 
     with pytest.raises(InvalidRequest) as captured:
         OpenLease(tmp_path / "state", extensions=(registration,))
 
     assert captured.value.details == {
         "extension": "former",
-        "version": 2,
-        "expected_version": 3,
+        "version": 3,
+        "expected_version": 4,
     }
+
+
+def test_callback_selection_captures_immutable_managed_input() -> None:
+    original = {"command": "bdd", "targets": ["repo-3", "repo-2"]}
+
+    selection = CallbackSelection(
+        "zpp.behave",
+        "verify",
+        CallbackEvent.RECONCILE_AFTER_COHORT,
+        CallbackMode.OBSERVE,
+        input=original,
+    )
+    original["command"] = "unit"
+    original["targets"].append("repo-1")
+
+    assert selection.input == {
+        "command": "bdd",
+        "targets": ("repo-3", "repo-2"),
+    }
+    with pytest.raises(TypeError):
+        selection.input["command"] = "unit"  # type: ignore[index]
+
+
+def test_callback_selection_rejects_non_managed_input() -> None:
+    with pytest.raises(CodecError, match="unsupported managed value"):
+        CallbackSelection(
+            "zpp.behave",
+            "verify",
+            CallbackEvent.RECONCILE_AFTER_COHORT,
+            CallbackMode.OBSERVE,
+            input=object(),  # type: ignore[arg-type]
+        )
 
 
 def test_configuration_uses_the_public_protocol_without_widening_other_stores() -> None:

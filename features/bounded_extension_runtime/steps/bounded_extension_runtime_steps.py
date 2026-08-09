@@ -6,8 +6,13 @@ from behave import given, then, when
 
 from features.support.openlease_support import capture, ensure_topology, space
 from openlease import (
+    CallbackEvent,
+    CallbackMode,
+    CallbackSelection,
+    CodecError,
     ConfigurationLayout,
     ConfigurationTarget,
+    ExtensionCallback,
     ExtensionManifest,
     ExtensionOperation,
     ExtensionRegistration,
@@ -44,7 +49,7 @@ def bind(context):
     )
 
 
-@given("two version-three extensions declare named operations")
+@given("two version-four extensions declare named operations")
 def given_two_extensions(context) -> None:
     context.calls = []
 
@@ -64,8 +69,8 @@ def given_two_extensions(context) -> None:
     )
 
 
-@given("a version-two extension declares a named operation")
-def given_version_two_extension(context) -> None:
+@given("a version-three extension declares a named operation")
+def given_version_three_extension(context) -> None:
     context.calls = []
 
     def operation(_invocation):
@@ -73,7 +78,7 @@ def given_version_two_extension(context) -> None:
 
     context.registrations = (
         ExtensionRegistration(
-            ExtensionManifest("former", 2),
+            ExtensionManifest("former", 3),
             operations=(ExtensionOperation("run", operation),),
         ),
     )
@@ -91,11 +96,86 @@ def when_attempt_construct(context) -> None:
     )
 
 
-@then("registration fails with version-three guidance")
-def then_version_three_guidance(context) -> None:
+@then("registration fails with version-four guidance")
+def then_version_four_guidance(context) -> None:
     assert isinstance(context.error, InvalidRequest)
-    assert context.error.details["version"] == 2
-    assert context.error.details["expected_version"] == 3
+    assert context.error.details["version"] == 3
+    assert context.error.details["expected_version"] == 4
+
+
+@given("a version-four callback selection with a mutable ZPP verification input")
+def given_mutable_callback_input(context) -> None:
+    context.callback_input = {"command": "bdd", "complete": True}
+    context.received_callback_input = []
+
+    def verify(invocation):
+        context.received_callback_input.append(invocation.input)
+
+    registration = ExtensionRegistration(
+        ExtensionManifest("zpp.behave"),
+        operations=(ExtensionOperation("verify", verify),),
+        callbacks=(
+            ExtensionCallback(CallbackEvent.RECONCILE_AFTER_COHORT, "verify"),
+        ),
+    )
+    context.system = OpenLease(
+        context.root / "state",
+        openspec=context.openspec,
+        extensions=(registration,),
+    )
+    context.selection = CallbackSelection(
+        "zpp.behave",
+        "verify",
+        CallbackEvent.RECONCILE_AFTER_COHORT,
+        CallbackMode.OBSERVE,
+        input=context.callback_input,
+    )
+    document = context.root / "callback.json"
+    document.write_text("{}", encoding="utf-8")
+    context.bound = context.system.bind_extension_document(
+        "zpp.behave",
+        document,
+        codec="json",
+        layout="dedicated",
+    )
+
+
+@when("the owner changes the original input after selection")
+def when_mutate_original_callback_input(context) -> None:
+    context.callback_input["command"] = "unit"
+
+
+@then("the selected callback retains the original managed input")
+def then_callback_input_captured(context) -> None:
+    assert context.selection.input == {"command": "bdd", "complete": True}
+
+
+@then("the callback operation receives that exact captured input")
+def then_callback_receives_captured_input(context) -> None:
+    context.bound.invoke("verify", context.selection.input)
+    assert context.received_callback_input == [context.selection.input]
+
+
+@given("a version-four callback selection with a non-managed input value")
+def given_non_managed_callback_input(context) -> None:
+    context.callback_factory = lambda: CallbackSelection(
+        "zpp.behave",
+        "verify",
+        CallbackEvent.RECONCILE_AFTER_COHORT,
+        CallbackMode.OBSERVE,
+        input=object(),
+    )
+
+
+@when("the host attempts to select the callback")
+def when_select_invalid_callback(context) -> None:
+    capture(context, context.callback_factory)
+
+
+@then("selection fails before planning or extension invocation")
+def then_invalid_selection_fails_early(context) -> None:
+    assert isinstance(context.error, CodecError)
+    assert not (context.root / "state").exists()
 
 
 @then("no extension code or managed write runs")
