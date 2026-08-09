@@ -3,11 +3,17 @@ Feature: Invoke explicitly registered bounded extensions
   OpenLease provides narrow managed configuration and storage without making
   registration or configuration an execution or lifecycle authority.
 
-  Scenario: Registration is inert
-    Given two current extensions declare named operations
+  Scenario: Version-three registration is inert
+    Given two version-three extensions declare named operations
     When the host constructs the bounded runtime
     Then both exact identities are registered
     And no validator operation callback managed write or lifecycle action runs
+
+  Scenario: Reject a version-two registration
+    Given a version-two extension declares a named operation
+    When the host attempts to construct the bounded runtime
+    Then registration fails with version-three guidance
+    And no extension code or managed write runs
 
   Scenario: Configuration presence does not activate an operation
     Given a registered operation and configuration that names a runner
@@ -20,7 +26,26 @@ Feature: Invoke explicitly registered bounded extensions
     Given an extension validator rejects the bound configuration
     When the host attempts to bind the extension
     Then validation fails before the handler starts
+    And the error is configuration_validation_failed
     And no managed record is created
+
+  Scenario: Explain effective configuration through the public contract
+    Given a bound extension with ordered configuration sources
+    When the host requests its public configuration snapshot record
+    Then the record identifies every binding and the winning source for each key
+    And configuration exposes result-returning mutations while data and cache do not
+
+  Scenario: Return the completed explicit configuration write
+    Given a bound extension with one writable configuration source
+    When the host explicitly sets and deletes configuration keys
+    Then each call returns its exact completed write disposition
+    And mapping assignment still saves automatically
+
+  Scenario: Convert managed configuration for downstream validation
+    Given an immutable managed configuration snapshot with nested values
+    When a dependent product converts it through the public plain-value helper
+    Then it receives independent ordinary dictionaries and lists
+    And supported scalar values retain their meaning
 
   Scenario: Preserve completed writes after handler failure
     Given an operation writes durable data and cache before failing

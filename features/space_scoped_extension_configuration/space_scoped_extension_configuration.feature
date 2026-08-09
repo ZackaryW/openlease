@@ -41,20 +41,32 @@ Feature: Manage explicit extension configuration documents
   Scenario: Reject a same-key conflict
     Given two handles observe the same writable configuration key
     When both handles assign different replacements
-    Then the second assignment reports a configuration conflict
+    Then the second assignment reports configuration_conflict
     And the first replacement remains authoritative
 
   Scenario: Reject a same-key conflict whose baseline was absent
     Given two handles observe one writable configuration without the new key
     When both handles assign different replacements
-    Then the second assignment reports a configuration conflict
+    Then the second assignment reports configuration_conflict
     And the first replacement remains authoritative
 
   Scenario: Reject a writable path replaced by an escaping symlink
     Given a writable document is bound before its path becomes an escaping symlink
     When the caller assigns through the replaced binding
-    Then the configuration mutation reports a path-change error
+    Then the configuration mutation reports configuration_path_changed
     And the symlink and its external target remain unchanged
+
+  Scenario: Reject mutation through a read-only configuration
+    Given a direct read-only configuration document
+    When the caller explicitly sets a configuration key
+    Then the mutation reports configuration_read_only
+    And the source document remains unchanged
+
+  Scenario: Report a decode failure through CLI JSON
+    Given an invalid explicitly declared configuration document
+    When the host binds it through the JSON CLI
+    Then the CLI reports configuration_decode_failed with an invalid_request outcome
+    And exits with status 2
 
   Scenario: Keep nested reads defensive
     Given a direct dedicated document contains a nested mapping
@@ -67,6 +79,18 @@ Feature: Manage explicit extension configuration documents
     When the host explicitly initializes that writable document
     Then exactly that document is created with the initial mapping
     And a repeated initialization does not truncate it
+
+  Scenario: Reuse one immutable direct-document binding
+    Given an explicit binding value with codec layout path and write authority
+    When the host opens and initializes documents through that binding shape
+    Then both operations preserve the declared binding metadata
+    And neither codec nor layout is inferred
+
+  Scenario: Preserve scalar direct-document calls
+    Given equivalent object and scalar direct-document bindings
+    When the host opens each existing document
+    Then both forms produce the same configuration and provenance
+    And the scalar form is not deprecated
 
   Scenario: Reject prior state without touching referenced documents
     Given a prior-schema state references an authored YAML document
