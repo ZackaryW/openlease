@@ -1,7 +1,7 @@
 # Bounded extension runtime
 
-OpenLease contract version 3 is a clean replacement for the version-two public
-configuration surface and the earlier resolver-only extension seam. Hosts must
+OpenLease contract version 4 is a clean replacement for version 3, the
+version-two public configuration surface, and the earlier resolver-only extension seam. Hosts must
 explicitly register extensions, operations, callbacks,
 validators, and additional codecs. Registration and configuration presence are
 inert; only a host invocation or an accepted lifecycle callback selection executes
@@ -84,12 +84,19 @@ reported and authoritative.
 
 ## Reconciliation boundary
 
-Reconciliation plans may select callbacks by exact extension, operation, event,
-mode, and repository/cohort target. `reconcile.before_repository` may be an explicit
-gate before Git mutation. `reconcile.after_repository` and
-`reconcile.after_cohort` are observational and continue/report failures without
-creating an unverified state. Callback drift is checked against accepted evidence
-before mutation.
+Reconciliation plans select callbacks by exact extension, operation, event, mode,
+repository/cohort target, and optional managed input. Selection validates and
+freezes that input, displays it in the plan, includes it in drift evidence, and
+passes it unchanged to the operation; configuration never infers or changes the
+command. `reconcile.before_repository` may be an explicit gate before Git mutation.
+`reconcile.after_repository` and `reconcile.after_cohort` are observational and
+continue/report failures without creating an unverified state.
+
+After every selected repository integrates, each after-cohort selection runs once
+per completed repository in reconciliation order. Every invocation resolves that
+repository's extension context, identifies both the cohort and repository in its
+event, and produces a separate outcome. One observational failure does not suppress
+later repository invocations or reinterpret completed Git results.
 
 Extensions never choose or perform staging, commits, merge/rebase strategy,
 integration, conflict resolution, or finalization. These remain owner-directed Git
@@ -105,7 +112,7 @@ paths, codecs, overlays, storage, and concurrency; it does not modify ZPP profil
 traits, process policy, environment selection, or runner behavior.
 
 There is no compatibility decoder or automatic migration. Extension contracts
-before version 3, state schemas before version 3, resolver-only registrations, and
+before version 4, state schemas before version 3, resolver-only registrations, and
 the injected reconciliation verifier
 are rejected with reinitialization guidance. Authored YAML/TOML/JSON documents are
 not read or rewritten while old state is rejected.

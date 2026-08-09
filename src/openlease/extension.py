@@ -10,10 +10,11 @@ from openlease.configuration_codec import (
     ConfigurationCodec,
     ConfigurationLayout,
     ManagedValue,
+    immutable_managed_value,
 )
 from openlease.core.configuration import ConfigurationTarget, ExtensionRoots
 
-EXTENSION_CONTRACT_VERSION = 3
+EXTENSION_CONTRACT_VERSION = 4
 
 
 class CallbackEvent(StrEnum):
@@ -244,6 +245,11 @@ class CallbackSelection:
     event: CallbackEvent
     mode: CallbackMode
     repository_id: str | None = None
+    input: ManagedValue | None = None
+
+    def __post_init__(self) -> None:
+        if self.input is not None:
+            object.__setattr__(self, "input", immutable_managed_value(self.input))
 
 
 @dataclass(frozen=True, slots=True)

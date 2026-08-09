@@ -1420,12 +1420,16 @@ class OpenLease:
                 callback_outcomes.append(
                     self._dispatch_reconcile_callback(space_id, repository_id, callback)
                 )
-        cohort_repository = completed[0] if completed else None
-        for callback in callbacks:
-            if callback.event is CallbackEvent.RECONCILE_AFTER_COHORT:
+        cohort_callbacks = tuple(
+            callback
+            for callback in callbacks
+            if callback.event is CallbackEvent.RECONCILE_AFTER_COHORT
+        )
+        for repository_id in completed:
+            for callback in cohort_callbacks:
                 callback_outcomes.append(
                     self._dispatch_reconcile_callback(
-                        space_id, cohort_repository, callback
+                        space_id, repository_id, callback
                     )
                 )
         return CommandResult(
@@ -2199,6 +2203,7 @@ class OpenLease:
                     "event": selection.event,
                     "mode": selection.mode,
                     "repository_id": selection.repository_id,
+                    "input": selection.input,
                     "registration": structural_key(
                         {
                             "contract": registration.manifest.contract_version,
@@ -2218,41 +2223,25 @@ class OpenLease:
     def _dispatch_reconcile_callback(
         self,
         space_id: str,
-        repository_id: str | None,
+        repository_id: str,
         selection: CallbackSelection,
     ):
-        state = self.snapshot()
-        space = self._space(state, space_id)
-        target_repository = repository_id or next(
-            (item.repository_id for item in space.members if item.generated),
-            None,
-        )
-        if target_repository is None:
-            raise InvalidRequest("reconciliation callback has no target repository")
         bound = self.bind_extension(
             selection.extension_id,
             space_id,
-            ConfigurationTarget.repository(target_repository),
+            ConfigurationTarget.repository(repository_id),
         )
         event = ExtensionEvent(
             event=selection.event,
             mode=selection.mode,
-            repository_id=(
-                repository_id
-                if selection.event is not CallbackEvent.RECONCILE_AFTER_COHORT
-                else None
-            ),
-            cohort_id=(
-                space_id
-                if selection.event is CallbackEvent.RECONCILE_AFTER_COHORT
-                else None
-            ),
+            repository_id=repository_id,
+            cohort_id=space_id,
         )
         return self.extension_runtime.invoke(
             self._extension(selection.extension_id),
             bound,
             selection.operation,
-            None,
+            selection.input,
             event=event,
         )
 

@@ -98,7 +98,7 @@ result envelope.
 
 ## Extension configuration
 
-Dependent products explicitly register version-three extensions and delegate generic
+Dependent products explicitly register version-four extensions and delegate generic
 configuration and confined storage plumbing to OpenLease. Registration is inert:
 configuration never selects a runner, invokes an operation, or authorizes Git.
 The extension still owns its schema, defaults, and product meaning.
@@ -205,10 +205,14 @@ compatibility read or automatic migration and never rewrites referenced authored
 YAML, TOML, or JSON while rejecting old state.
 
 Reconciliation callbacks are also explicit. A plan selects exact extension,
-operation, event, mode, and repository/cohort targets. Only
+operation, event, mode, repository/cohort targets, and immutable managed input such
+as `{"command": "bdd", "complete": true}`. The input is visible in callback drift
+evidence and is passed unchanged; configuration never chooses it. Only
 `reconcile.before_repository` may gate before Git mutation; post-repository and
 post-cohort callbacks are observational, and their failures never invent an
-"unverified" lifecycle state. Source/destination refs, strategies, staging,
+"unverified" lifecycle state. Each selected post-cohort callback runs once per
+completed repository in reconciliation order with isolated repository context and
+both cohort and repository event identity. Source/destination refs, strategies, staging,
 commits, merge/rebase, conflict resolution, and finalization remain core
 owner-directed OpenLease/Git work, never extension policy.
 

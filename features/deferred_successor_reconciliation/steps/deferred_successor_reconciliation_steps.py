@@ -1055,7 +1055,10 @@ def repository_outcomes_reported_in_order(context) -> None:
         HandlerStatus.FAILED,
         HandlerStatus.COMPLETED,
     ]
-    assert [item.target for item in outcomes] == ["repository:repo-3", "repository:repo-2"]
+    assert [item.target for item in outcomes] == [
+        "repository:repo-3",
+        "repository:repo-2",
+    ]
 
 
 @then("every ordinary reconciliation result remains unchanged")

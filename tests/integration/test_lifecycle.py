@@ -236,10 +236,17 @@ def test_repeated_lock_is_a_compatible_noop(tmp_path: Path) -> None:
 def test_reconciliation_dispatches_only_selected_callbacks_in_event_order(
     tmp_path: Path,
 ) -> None:
-    observed: list[tuple[CallbackEvent, str | None]] = []
+    observed: list[tuple[CallbackEvent, str | None, str | None, object]] = []
 
     def observe(invocation):
-        observed.append((invocation.event.event, invocation.event.repository_id))
+        observed.append(
+            (
+                invocation.event.event,
+                invocation.event.repository_id,
+                invocation.event.cohort_id,
+                invocation.input,
+            )
+        )
 
     registration = ExtensionRegistration(
         ExtensionManifest("zpp.behave"),
@@ -284,6 +291,7 @@ def test_reconciliation_dispatches_only_selected_callbacks_in_event_order(
             CallbackEvent.RECONCILE_BEFORE_REPOSITORY,
             CallbackMode.GATE,
             "repo-1",
+            {"phase": "before"},
         ),
         CallbackSelection(
             "zpp.behave",
@@ -291,19 +299,36 @@ def test_reconciliation_dispatches_only_selected_callbacks_in_event_order(
             CallbackEvent.RECONCILE_AFTER_REPOSITORY,
             CallbackMode.OBSERVE,
             "repo-1",
+            {"phase": "after"},
         ),
         CallbackSelection(
             "zpp.behave",
             "verify",
             CallbackEvent.RECONCILE_AFTER_COHORT,
             CallbackMode.OBSERVE,
+            input={"command": "bdd", "complete": True},
         ),
     )
     result = system.reconcile_apply("successor", (selection,), callbacks)
 
     assert result.data["completed"] == ["repo-1"]
     assert observed == [
-        (CallbackEvent.RECONCILE_BEFORE_REPOSITORY, "repo-1"),
-        (CallbackEvent.RECONCILE_AFTER_REPOSITORY, "repo-1"),
-        (CallbackEvent.RECONCILE_AFTER_COHORT, None),
+        (
+            CallbackEvent.RECONCILE_BEFORE_REPOSITORY,
+            "repo-1",
+            "successor",
+            {"phase": "before"},
+        ),
+        (
+            CallbackEvent.RECONCILE_AFTER_REPOSITORY,
+            "repo-1",
+            "successor",
+            {"phase": "after"},
+        ),
+        (
+            CallbackEvent.RECONCILE_AFTER_COHORT,
+            "repo-1",
+            "successor",
+            {"command": "bdd", "complete": True},
+        ),
     ]
