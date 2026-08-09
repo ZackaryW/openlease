@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from base64 import b64encode
 from dataclasses import dataclass, fields, is_dataclass
+from datetime import date, datetime, time
 from enum import Enum
 from pathlib import Path
 from typing import Any
@@ -16,6 +17,8 @@ def json_value(value: object) -> Any:
         return value.value
     if isinstance(value, Path):
         return str(value)
+    if isinstance(value, (datetime, date, time)):
+        return value.isoformat()
     if isinstance(value, bytes):
         return {"encoding": "base64", "value": b64encode(value).decode("ascii")}
     if isinstance(value, dict) or hasattr(value, "items"):
