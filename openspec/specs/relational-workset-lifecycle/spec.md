@@ -190,24 +190,71 @@ Release, close, recovery, projection removal, and worktree cleanup SHALL NOT mer
 - **WHEN** any retained branch lacks a reconciled or abandoned disposition or any generated worktree remains
 - **THEN** the system refuses to finalize the successor-space record and reports the outstanding members
 
+### Requirement: Reconciliation has no injected verifier compatibility surface
+The current reconciliation library contract SHALL NOT accept or invoke the former externally injected `verifier(scope, paths)` callable. Product-owned verification SHALL participate only as an explicitly registered and selected extension callback. OpenLease SHALL NOT adapt the former callable, synthesize callback registration from configuration, or retain dual reporting for old and new verification mechanisms.
+
+Intrinsic OpenLease preflight, Git-result inspection, state consistency, and ownership checks SHALL remain core reconciliation behavior rather than extension callbacks. Removing the injected verifier SHALL NOT weaken those checks or turn a configuration value into execution authority.
+
+#### Scenario: Reject the former verifier constructor input
+- **WHEN** a host attempts to construct current OpenLease with the superseded injected verifier argument
+- **THEN** construction rejects the former contract rather than adapting it into a callback
+
+#### Scenario: Keep core reconciliation checks without callbacks
+- **WHEN** reconciliation selects no extension callbacks
+- **THEN** OpenLease still performs its intrinsic plan, Git, state, and ownership checks without executing product verification
+
 ### Requirement: Explicit cohort reconciliation
-The first release SHALL provide an explicit `reconcile` command that is never triggered implicitly by lock, release, close, cleanup, recovery, projection removal, or finalization. The owner SHALL be able to supply the merge path after work is ready, as an ordered mapping from each selected generated source branch to its destination ref; `defer` SHALL NOT predetermine that path. A read-only reconciliation plan SHALL record the destination refs and their observed commits, inspect every selected generated member together, and report missing paths or branches, dirty worktrees, source and destination commits, divergence, likely textual conflicts, dependency-informed integration order, and required verification. Applying the accepted plan SHALL use the recorded merge path, require an explicit merge or rebase strategy for every repository, process one repository at a time, stop at the first conflict without touching remaining repositories, verify each completed repository, and run change-wide verification only after the full selected cohort is integrated. It SHALL record each member as pending, reconciled with its resulting commit, or explicitly abandoned.
+The first release SHALL provide an explicit `reconcile` command that is never triggered implicitly by lock, release, close, cleanup, recovery, projection removal, finalization, extension registration, configuration presence, operation registration, or callback availability. The owner SHALL supply the integration path after work is ready as an ordered mapping from each selected generated source branch to destination ref; `defer` SHALL NOT predetermine that path.
+
+A read-only reconciliation plan SHALL record destination refs and observed commits, inspect every selected generated member together, and report missing paths or branches, dirty worktrees, source and destination commits, divergence, likely textual conflicts, dependency-informed integration order, intrinsic OpenLease safety checks, and the exact optional extension callbacks selected for each event. Each callback selection SHALL name extension identity, operation, event, mode, and repository or cohort target. A registered callback that is not selected SHALL not appear as required work.
+
+Applying the accepted plan SHALL use only the recorded integration path, require an explicit merge or rebase strategy for every repository, process one repository at a time, and stop at the first Git conflict without touching later repositories. Callback code SHALL NOT choose or change a source, destination, strategy, staging action, commit, merge/rebase operation, conflict resolution, result record, or finalization disposition.
+
+The event `reconcile.before_repository` SHALL run after plan revalidation and immediately before OpenLease mutates that repository. It MAY be observational or MAY be explicitly selected as a gate. Failure of a gating callback SHALL stop before that repository's Git mutation and leave later repositories untouched. The event `reconcile.after_repository` SHALL run only after OpenLease completes the repository's integration and records its ordinary `reconciled` result. The event `reconcile.after_cohort` SHALL run only after every selected member completes and is recorded according to the ordinary contract. Both post-mutation events SHALL be observational in this release.
+
+Failure of an observational callback SHALL be recorded and reported separately without rolling back, downgrading, blocking finalization of, or otherwise reinterpreting the completed reconciliation result. Reconciliation SHALL retain only the existing member statuses `pending`, `reconciled`, and `abandoned`; this change SHALL NOT add integrated-but-unverified, callback-retry, or callback-gated-finalization state. Supporting a post-mutation gate requires a separate lifecycle change.
+
+The accepted plan SHALL bind callback selection to the current compatible registration and target-context evidence. Apply SHALL reject callback registration or target drift before any Git mutation. With no selected callbacks, reconciliation SHALL follow the same explicit Git integration and intrinsic safety path without invoking extension code.
 
 #### Scenario: Specify the merge path after work is ready
-- **WHEN** a released successor has generated branches for its affected repositories and the owner invokes `reconcile` with an ordered destination mapping
-- **THEN** the system plans exactly those generated source-to-destination legs against current destination commits without requiring destinations for unaffected associated repositories or requiring that merge path to have existed when the successor was deferred
+- **WHEN** a released successor has generated branches and the owner invokes `reconcile` with an ordered destination mapping
+- **THEN** OpenLease plans exactly those source-to-destination legs against current commits without deriving any path or strategy from extension configuration
 
 #### Scenario: Reconcile provider before consumer by default
-- **WHEN** repo 2 depends on a writable OpenSpec authority hosted by repo 3 and no owner override changes the plan order
-- **THEN** the reconciliation plan places repo 3 before repo 2, displays that order before mutation, and runs complete cross-repository verification after both integrations
+- **WHEN** repo 2 depends on a writable OpenSpec authority hosted by repo 3 and no owner override changes plan order
+- **THEN** the plan places repo 3 before repo 2 and displays that integration order plus any explicitly selected callbacks before mutation
 
-#### Scenario: Stop a cohort on the first conflict
-- **WHEN** one repository reconciliation encounters a Git conflict
-- **THEN** the operation preserves the conflict for explicit resolution, leaves all later repositories untouched and pending, and retains the complete cohort record
+#### Scenario: Stop a cohort on the first Git conflict
+- **WHEN** one repository integration encounters a Git conflict
+- **THEN** OpenLease preserves the conflict for explicit resolution, leaves later repositories untouched and pending, and invokes no post-repository callback for the conflicted leg
 
-#### Scenario: Require an explicit complete merge path
-- **WHEN** a caller applies `reconcile` without a destination and merge-or-rebase strategy for every selected generated member
-- **THEN** the system rejects mutation and reports the missing legs without selecting defaults
+#### Scenario: Require an explicit complete integration path
+- **WHEN** apply lacks a destination or merge/rebase strategy for any selected generated member
+- **THEN** OpenLease rejects mutation and reports missing legs without selecting defaults from callback or extension configuration
+
+#### Scenario: Reconcile without extension callbacks
+- **WHEN** an accepted plan selects no extension callbacks
+- **THEN** OpenLease performs explicit integration and intrinsic safety checks without invoking any registered extension operation
+
+#### Scenario: Stop at an explicitly selected pre-integration gate
+- **WHEN** a gating `reconcile.before_repository` callback fails
+- **THEN** OpenLease records its outcome, does not mutate that repository, and leaves all later unprocessed repositories untouched
+
+#### Scenario: Report an observational repository callback failure
+- **WHEN** a selected `reconcile.after_repository` callback fails after successful integration
+- **THEN** OpenLease preserves the ordinary reconciled result, reports the callback failure separately, and introduces no unverified status
+
+#### Scenario: Report an observational cohort callback failure
+- **WHEN** a selected `reconcile.after_cohort` callback fails after all members reconcile
+- **THEN** OpenLease preserves every member result and ordinary finalization eligibility while reporting the extension outcome separately
+
+#### Scenario: Reject an unsupported post-mutation gate
+- **WHEN** a request selects gating mode for `reconcile.after_repository` or `reconcile.after_cohort`
+- **THEN** planning rejects the unsupported mode before Git mutation
+
+#### Scenario: Reject callback drift before integration
+- **WHEN** an accepted plan's selected callback registration or target context changes before apply
+- **THEN** OpenLease rejects the stale plan before staging, committing, merging, rebasing, or changing reconciliation state
 
 ### Requirement: OpenSpec workset interoperability
 The system SHALL make an accepted relational working view openable through OpenSpec's workset surface. Projection to an OpenSpec workset SHALL preserve the ordered set of distinct member folders while `openlease` retains relationship information that the OpenSpec workset format cannot express.
