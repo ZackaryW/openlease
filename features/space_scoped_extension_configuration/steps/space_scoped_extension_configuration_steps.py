@@ -1,640 +1,371 @@
-# ruff: noqa: E501
 from __future__ import annotations
 
-from pathlib import Path
+import json
 
 from behave import given, then, when
 
-from features.support.openlease_support import (
-    capture,
-    ensure_topology,
-    git,
-    space,
-)
+from features.support.openlease_support import capture, ensure_topology, space
 from openlease import (
+    ConfigurationLayout,
     ConfigurationTarget,
     ExtensionManifest,
     ExtensionRegistration,
     InvalidRequest,
     OpenLease,
 )
+from openlease.core.state_codec import StateFormatError
+from openlease.extension_runtime import ConfigurationConflict
 
 
-def registered_system(context, resolver=None) -> OpenLease:
-    registration = ExtensionRegistration(ExtensionManifest("zpp", 1), resolver)
-    system = OpenLease(
+def current_system(context, *identifiers: str) -> OpenLease:
+    registrations = tuple(
+        ExtensionRegistration(ExtensionManifest(identifier))
+        for identifier in identifiers
+    )
+    context.system = OpenLease(
         context.root / "state",
         openspec=context.openspec,
-        extensions=(registration,),
+        extensions=registrations,
     )
-    context.system = system
-    return system
+    return context.system
 
 
-def document(context, name: str, content: str | None = None) -> Path:
-    path = context.root / "configuration" / f"{name}.md"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(content or name, encoding="utf-8")
-    return path
+def direct_content(codec: str) -> str:
+    if codec == "yaml":
+        return "runner: argv\ntargets:\n  - bdd\n"
+    if codec == "toml":
+        return 'runner = "argv"\ntargets = ["bdd"]\n'
+    return '{"runner": "argv", "targets": ["bdd"]}'
 
 
-def bind(
-    context,
-    identifier: str,
-    scope_kind: str,
-    scope_id: str | None = None,
-    *,
-    source: Path | None = None,
-    order: int = 0,
-) -> Path:
-    path = source or document(context, identifier)
-    context.system.bind_configuration_source(
-        "zpp", identifier, path, scope_kind, scope_id, order=order
+@given("a current extension and a dedicated {codec} document")
+def given_dedicated_document(context, codec: str) -> None:
+    current_system(context, "zpp.behave")
+    context.codec = codec
+    context.source = context.root / f"zpp.behave.{codec}"
+    context.source.write_text(direct_content(codec), encoding="utf-8")
+    context.before_state = context.system.snapshot()
+
+
+@when("the host binds that direct document read-only")
+def when_bind_read_only(context) -> None:
+    context.bound = context.system.bind_extension_document(
+        "zpp.behave",
+        context.source,
+        codec=context.codec,
+        layout=ConfigurationLayout.DEDICATED,
     )
-    return path
 
 
-def basic_context(context) -> None:
-    registered_system(context)
+@then("the effective configuration contains the equivalent managed values")
+def then_equivalent_values(context) -> None:
+    assert context.bound.config["runner"] == "argv"
+    assert context.bound.config["targets"] == ("bdd",)
+
+
+@then("no persistent space or configuration binding is created")
+def then_no_persistent_binding(context) -> None:
+    assert context.system.snapshot() == context.before_state
+    assert context.system.snapshot().configuration_sources == ()
+
+
+@given("a shared TOML document with nested zpp and exact dotted zpp.behave tables")
+def given_dotted_toml(context) -> None:
+    current_system(context, "zpp.behave")
+    context.source = context.root / "shared.toml"
+    context.source.write_text(
+        '# shared\n[zpp.behave]\nrunner = "nested"\n\n'
+        '["zpp.behave"]\nrunner = "exact" # keep\n',
+        encoding="utf-8",
+    )
+    context.bound = context.system.bind_extension_document(
+        "zpp.behave", context.source, codec="toml", layout="shared", writable=True
+    )
+
+
+@when("zpp.behave updates its exact shared namespace")
+def when_update_dotted(context) -> None:
+    context.bound.config["runner"] = "updated"
+    context.rendered = context.source.read_text(encoding="utf-8")
+
+
+@then("the nested zpp table and comments remain unrelated")
+def then_nested_unrelated(context) -> None:
+    assert "nested" in context.rendered
+    assert "# shared" in context.rendered
+    assert "# keep" in context.rendered
+
+
+@then("the dotted identity remains one quoted TOML key")
+def then_quoted_identity(context) -> None:
+    assert '["zpp.behave"]' in context.rendered
+    assert context.bound.config["runner"] == "updated"
+
+
+@given("current machine repository root and child configuration bindings")
+def given_ordered_bindings(context) -> None:
+    current_system(context, "extension")
     ensure_topology(context)
-    space(context, "work")
-
-
-@given(
-    "a host explicitly registers a namespaced extension with a supported contract version"
-)
-def given_supported_registration(context) -> None:
-    basic_context(context)
-
-
-@when("the host requests that extension through OpenLease")
-def when_request_registered_extension(context) -> None:
-    context.result = context.system.resolve_extension_context(
-        "zpp", "work", ConfigurationTarget.repository("repo-1")
-    )
-
-
-@then("OpenLease makes only that registered namespace available")
-def then_only_registered_namespace(context) -> None:
-    assert context.system.registered_extensions == ("zpp",)
-    assert context.result.data.context.extension_id == "zpp"
-
-
-@then("does not discover globally installed extension code")
-def then_no_global_discovery(context) -> None:
-    assert context.system.registered_extensions == ("zpp",)
-
-
-@given("a host supplies duplicate extension identities")
-def given_duplicate_extensions(context) -> None:
-    manifest = ExtensionManifest("zpp", 1)
-    context.registrations = (
-        ExtensionRegistration(manifest),
-        ExtensionRegistration(manifest),
-    )
-
-
-@given("a host supplies an unsupported contract version")
-def given_unsupported_extension(context) -> None:
-    context.registrations = (ExtensionRegistration(ExtensionManifest("zpp", 99)),)
-
-
-@when("the host constructs OpenLease")
-def when_construct_openlease(context) -> None:
-    capture(
-        context,
-        lambda: OpenLease(
-            context.root / "state",
-            openspec=context.openspec,
-            extensions=context.registrations,
-        ),
-    )
-
-
-@then("OpenLease rejects the complete extension set")
-def then_extension_set_rejected(context) -> None:
-    assert isinstance(context.error, InvalidRequest)
-
-
-@then("no extension context is resolved")
-def then_no_extension_context(context) -> None:
-    assert context.result is None
-
-
-@given(
-    "repo 1 has machine configuration, two ordered packs, direct space configuration, repository configuration, root authority configuration, and distinct child A and child B configuration"
-)
-def given_nested_configuration(context) -> None:
-    basic_context(context)
-    context.system.define_configuration_pack("zpp", "first")
-    context.system.define_configuration_pack("zpp", "second")
-    context.system.attach_configuration_pack("work", "zpp", "first", order=1)
-    context.system.attach_configuration_pack("work", "zpp", "second", order=2)
-    bind(context, "machine", "machine")
-    bind(context, "pack-first", "pack", "first")
-    bind(context, "pack-second", "pack", "second")
-    bind(context, "space", "space", "work")
-    bind(context, "repository", "repository", "repo-1")
-    bind(context, "root", "authority", "root")
-    bind(context, "child-a", "authority", "a")
-    bind(context, "child-b", "authority", "b")
-
-
-@given("one space targets child A")
-def given_target_child_a(context) -> None:
-    context.target = ConfigurationTarget.authority("a")
-
-
-@when("the host requests child A context for its extension")
-def when_resolve_child_a(context) -> None:
-    context.result = context.system.resolve_extension_context(
-        "zpp", "work", ConfigurationTarget.authority("a")
-    )
-
-
-@then(
-    "the documents are ordered from machine through both packs, direct space, repository, root, and child A scopes"
-)
-def then_nested_order(context) -> None:
-    assert tuple(item.identifier for item in context.result.data.context.documents) == (
-        "machine",
-        "pack-first",
-        "pack-second",
-        "space",
-        "repository",
-        "root",
-        "child-a",
-    )
-
-
-@then("child B configuration is excluded")
-def then_child_b_excluded(context) -> None:
-    assert "child-b" not in {
-        item.identifier for item in context.result.data.context.documents
+    space(context, "work", authorities=("a",))
+    values = {
+        "machine": {"nested": {"machine": 1}, "machine": True},
+        "repository": {"nested": {"repository": 2}},
+        "root": {"winner": "root"},
+        "child-a": {"winner": "a"},
+        "child-b": {"winner": "b"},
     }
+    scopes = {
+        "machine": ("machine", None),
+        "repository": ("repository", "repo-1"),
+        "root": ("authority", "root"),
+        "child-a": ("authority", "a"),
+        "child-b": ("authority", "b"),
+    }
+    for identifier, value in values.items():
+        path = context.root / f"{identifier}.json"
+        path.write_text(json.dumps(value), encoding="utf-8")
+        scope_kind, scope_id = scopes[identifier]
+        context.system.bind_configuration_source(
+            "extension",
+            identifier,
+            path,
+            scope_kind,
+            scope_id,
+            codec="json",
+            layout="dedicated",
+            writable=True,
+        )
 
 
-@then("OpenLease preserves each opaque document for extension-owned interpretation")
-def then_documents_are_opaque(context) -> None:
-    for item in context.result.data.context.documents:
-        assert item.content == item.identifier.encode()
-        assert item.source_kind.value == "external"
-        assert item.repository_id is None
-
-
-@given(
-    "root, child A, and child B configuration scopes participate in one durable space"
-)
-def given_separate_config_scopes(context) -> None:
-    basic_context(context)
-    bind(context, "root", "authority", "root")
-    bind(context, "child-a", "authority", "a")
-    bind(context, "child-b", "authority", "b")
-    context.before = context.system.snapshot()
-
-
-@when(
-    "the host attaches a reusable configuration pack and resolves each child separately"
-)
-def when_attach_pack_and_resolve_children(context) -> None:
-    context.system.define_configuration_pack("zpp", "shared")
-    bind(context, "pack", "pack", "shared")
-    context.system.attach_configuration_pack("work", "zpp", "shared")
-    context.a = context.system.resolve_extension_context(
-        "zpp", "work", ConfigurationTarget.authority("a")
+@when("the host binds child A configuration")
+def when_bind_child_a(context) -> None:
+    context.bound = context.system.bind_extension(
+        "extension", "work", ConfigurationTarget.authority("a")
     )
-    context.b = context.system.resolve_extension_context(
-        "zpp", "work", ConfigurationTarget.authority("b")
-    )
+    context.snapshot = context.bound.config.snapshot_record()
 
 
-@then(
-    "the pack participates between machine and repository configuration for both children"
-)
-def then_pack_in_both(context) -> None:
-    assert "pack" in {item.identifier for item in context.a.data.context.documents}
-    assert "pack" in {item.identifier for item in context.b.data.context.documents}
+@then("later top-level keys replace earlier complete nested values")
+def then_shallow_overlay(context) -> None:
+    assert context.snapshot.values["nested"] == {"repository": 2}
+    assert context.snapshot.values["winner"] == "a"
 
 
-@then(
-    "each resolved context identifies the participating pack and its observed generation"
-)
-def then_pack_generation(context) -> None:
-    for result in (context.a, context.b):
-        assert len(result.data.context.packs) == 1
-        pack = result.data.context.packs[0]
-        assert pack.identifier == "shared"
-        assert pack.observed_generation
+@then("child B configuration does not participate")
+def then_no_sibling(context) -> None:
+    assert "child-b" not in {item.identifier for item in context.snapshot.bindings}
 
 
-@then("no configuration scope or pack becomes a child space or leased authority")
-def then_config_not_leased(context) -> None:
-    state = context.system.snapshot()
-    assert tuple(item.identifier for item in state.spaces) == ("work",)
-    assert state.leases == ()
-
-
-@then("the affected claim remains unchanged")
-def then_claim_unchanged(context) -> None:
-    before = next(item for item in context.before.spaces if item.identifier == "work")
-    after = next(
-        item for item in context.system.snapshot().spaces if item.identifier == "work"
-    )
-    assert after.affected_repository_ids == before.affected_repository_ids
-    assert after.affected_authority_ids == before.affected_authority_ids
-
-
-@given(
-    "a successor space has one generated repository member and one pinned repository member"
-)
-def given_successor_with_generated_and_pinned(context) -> None:
-    registered_system(context)
-    ensure_topology(context)
-    source = context.repos["repo-1"] / ".zpp" / "traits.md"
-    source.parent.mkdir()
-    source.write_text("source", encoding="utf-8")
-    git(context.repos["repo-1"], "add", ".zpp/traits.md")
-    git(context.repos["repo-1"], "commit", "--quiet", "-m", "config")
-    space(context, "blocker", authorities=("a",))
-    space(context, "request", authorities=("a",))
-    context.system.lock("blocker")
-    context.system.defer("request", "successor")
-    context.system.bind_configuration_source(
-        "zpp", "repo-source", source, "authority", "a"
-    )
-    context.target_space = "successor"
-
-
-@when("the host requests an explicit repository or authority context")
-def when_request_successor_context(context) -> None:
-    context.result = context.system.resolve_extension_context(
-        "zpp", context.target_space, ConfigurationTarget.authority("a")
+@given("two writable sources for one space-scoped extension")
+def given_two_writers(context) -> None:
+    given_ordered_bindings(context)
+    context.bound = context.system.bind_extension(
+        "extension",
+        "work",
+        ConfigurationTarget.authority("a"),
+        writable_source="root",
     )
 
 
-@then("generated authorities use their recorded effective worktree paths")
-def then_generated_effective(context) -> None:
-    member = next(
-        item
-        for item in context.result.data.context.members
-        if item.repository_id == "repo-1"
+@when("the host selects the lower source and assigns a shadowed key")
+def when_write_shadowed(context) -> None:
+    context.bound.config["winner"] = "changed-root"
+
+
+@then("the lower source is published without a save call")
+def then_lower_published(context) -> None:
+    root = json.loads((context.root / "root.json").read_text(encoding="utf-8"))
+    assert root["winner"] == "changed-root"
+
+
+@then("the higher source remains the effective winner")
+def then_higher_wins(context) -> None:
+    assert context.bound.config["winner"] == "a"
+
+
+@given("two extensions observe different namespaces in one writable JSON document")
+def given_two_namespaces(context) -> None:
+    current_system(context, "extension-a", "extension-b")
+    context.source = context.root / "shared.json"
+    context.source.write_text(
+        '{"extension-a": {"key": 1}, "extension-b": {"key": 1}}',
+        encoding="utf-8",
     )
-    assert member.generated
-    assert "-olease-" in member.effective_path.name
-
-
-@then("pinned authorities use their exact recorded context paths")
-def then_pinned_exact(context) -> None:
-    member = next(
-        item
-        for item in context.result.data.context.members
-        if item.repository_id == "repo-2"
+    context.a = context.system.bind_extension_document(
+        "extension-a", context.source, codec="json", layout="shared", writable=True
     )
-    assert not member.generated
-    assert member.effective_path == context.repos["repo-2"].resolve()
-
-
-@then(
-    "the result includes immutable relationship, access, branch, and commit provenance"
-)
-def then_context_provenance(context) -> None:
-    resolved = context.result.data.context
-    assert resolved.relationships
-    assert all(item.starting_commit for item in resolved.members)
-    assert all(item.access_role for item in resolved.members)
-    try:
-        resolved.space_id = "changed"
-    except (AttributeError, TypeError):
-        pass
-    else:
-        raise AssertionError("extension context is mutable")
-
-
-@given(
-    "an extension source is appointed at a repository-relative path in a source checkout"
-)
-def given_repository_source(context) -> None:
-    given_successor_with_generated_and_pinned(context)
-
-
-@given("the selected successor records a generated worktree for that repository")
-def given_successor_records_worktree(context) -> None:
-    assert context.target_space == "successor"
-
-
-@when("the host resolves extension context in the successor")
-def when_resolve_successor(context) -> None:
-    when_request_successor_context(context)
-
-
-@then("OpenLease reads the same relative source beneath the effective worktree")
-def then_source_rebound(context) -> None:
-    item = context.result.data.context.documents[0]
-    assert "-olease-" in item.resolved_path
-    assert item.content == b"source"
-
-
-@then("does not copy, adopt, rewrite, or lease the source")
-def then_source_not_adopted(context) -> None:
-    assert (context.repos["repo-1"] / ".zpp" / "traits.md").read_text() == "source"
-
-
-@given("a readable extension source is appointed outside every registered repository")
-def given_external_source(context) -> None:
-    basic_context(context)
-    context.external = bind(context, "external", "machine")
-
-
-@when("the host resolves extension context")
-def when_resolve_repository_context(context) -> None:
-    context.result = context.system.resolve_extension_context(
-        "zpp", "work", ConfigurationTarget.repository("repo-1")
+    context.b = context.system.bind_extension_document(
+        "extension-b", context.source, codec="json", layout="shared", writable=True
     )
+    assert context.a.config["key"] == context.b.config["key"] == 1
 
 
-@then("OpenLease reads that exact canonical machine-local path")
-def then_external_exact(context) -> None:
-    assert Path(context.result.data.context.documents[0].resolved_path) == (
-        context.external.resolve()
+@when("both extensions assign their own keys")
+def when_both_assign(context) -> None:
+    context.a.config["key"] = 2
+    context.b.config["key"] = 3
+
+
+@then("both completed namespaces remain in the shared document")
+def then_both_remain(context) -> None:
+    value = json.loads(context.source.read_text(encoding="utf-8"))
+    assert value == {"extension-a": {"key": 2}, "extension-b": {"key": 3}}
+
+
+@given("two handles observe the same writable configuration key")
+def given_competing_handles(context) -> None:
+    current_system(context, "extension")
+    context.source = context.root / "config.json"
+    context.source.write_text('{"key": "old"}', encoding="utf-8")
+    options = dict(codec="json", layout="dedicated", writable=True)
+    context.first = context.system.bind_extension_document(
+        "extension", context.source, **options
     )
+    context.second = context.system.bind_extension_document(
+        "extension", context.source, **options
+    )
+    assert context.first.config["key"] == context.second.config["key"] == "old"
 
 
-@then("does not associate the path with a repository or lease")
-def then_external_not_owned(context) -> None:
-    source = context.system.snapshot().configuration_sources[0]
-    assert source.repository_id is None
-    assert context.system.snapshot().leases == ()
+@when("both handles assign different replacements")
+def when_competing_assignments(context) -> None:
+    context.first.config["key"] = "first"
+    capture(context, lambda: context.second.config.__setitem__("key", "second"))
 
 
-@given("a custom configuration source is missing or unreadable")
-def given_missing_source(context) -> None:
-    basic_context(context)
-    context.missing = context.root / "missing.md"
-    context.before = context.system.snapshot()
+@then("the second assignment reports a configuration conflict")
+def then_conflict(context) -> None:
+    assert isinstance(context.error, ConfigurationConflict)
 
 
-@when("the host appoints that source")
-def when_bind_missing(context) -> None:
+@then("the first replacement remains authoritative")
+def then_first_remains(context) -> None:
+    assert json.loads(context.source.read_text(encoding="utf-8"))["key"] == "first"
+
+
+@given("a direct dedicated document contains a nested mapping")
+def given_nested_direct(context) -> None:
+    current_system(context, "extension")
+    context.source = context.root / "config.json"
+    context.source.write_text('{"nested": {"key": "value"}}', encoding="utf-8")
+    context.bound = context.system.bind_extension_document(
+        "extension", context.source, codec="json", layout="dedicated"
+    )
+    context.before = context.source.read_bytes()
+
+
+@when("a caller attempts in-place mutation of the returned nested value")
+def when_nested_mutation(context) -> None:
     capture(
         context,
-        lambda: context.system.bind_configuration_source(
-            "zpp", "missing", context.missing, "machine"
-        ),
+        lambda: context.bound.config["nested"].__setitem__("key", "changed"),
     )
 
 
-@then("OpenLease rejects the complete binding")
-def then_binding_rejected(context) -> None:
-    assert isinstance(context.error, InvalidRequest)
+@then("the value is immutable")
+def then_immutable(context) -> None:
+    assert isinstance(context.error, (TypeError, AttributeError))
 
 
-@then("retains no partial configuration record")
-def then_no_partial_binding(context) -> None:
-    assert context.system.snapshot().configuration_sources == (
-        context.before.configuration_sources
+@then("the source document remains unchanged")
+def then_source_unchanged(context) -> None:
+    assert context.source.read_bytes() == context.before
+
+
+@given("a current extension and an absent dedicated YAML path")
+def given_absent_path(context) -> None:
+    current_system(context, "extension")
+    context.source = context.root / "new.yaml"
+
+
+@when("the host explicitly initializes that writable document")
+def when_initialize(context) -> None:
+    context.bound = context.system.initialize_extension_document(
+        "extension",
+        context.source,
+        codec="yaml",
+        layout="dedicated",
+        initial={"key": "value"},
     )
 
 
-@given("a locked space has resolved an attached configuration pack")
-def given_locked_pack(context) -> None:
-    registered_system(context)
-    ensure_topology(context)
-    space(context, "work", authorities=("a",))
-    context.pack_path = document(context, "pack", "first")
-    context.system.define_configuration_pack("zpp", "shared")
-    bind(context, "pack", "pack", "shared", source=context.pack_path)
-    context.system.attach_configuration_pack("work", "zpp", "shared")
-    context.system.lock("work")
-    context.first = context.system.resolve_extension_context(
-        "zpp", "work", ConfigurationTarget.authority("a")
-    )
-    context.before = context.system.snapshot()
+@then("exactly that document is created with the initial mapping")
+def then_initialized(context) -> None:
+    assert context.source.is_file()
+    assert context.bound.config["key"] == "value"
 
 
-@when("the pack content changes and the host requests context again")
-def when_pack_changes(context) -> None:
-    context.pack_path.write_text("second-content", encoding="utf-8")
-    context.second = context.system.resolve_extension_context(
-        "zpp", "work", ConfigurationTarget.authority("a")
-    )
-
-
-@then(
-    "OpenLease returns the current content with a changed observed generation and digest"
-)
-def then_live_content(context) -> None:
-    first = context.first.data.context.documents[0]
-    second = context.second.data.context.documents[0]
-    assert second.content == b"second-content"
-    assert second.content_digest != first.content_digest
-    assert second.observed_generation != first.observed_generation
-
-
-@then("does not require a refresh operation")
-def then_no_refresh(context) -> None:
-    assert context.second.operation == "resolve_extension_context"
-
-
-@then(
-    "leaves the lease, graph generation, affected claim, and worktree records unchanged"
-)
-def then_lifecycle_unchanged(context) -> None:
-    after = context.system.snapshot()
-    assert after.leases == context.before.leases
-    assert after.graph_generation == context.before.graph_generation
-    assert after.spaces == context.before.spaces
-
-
-@given("a configuration source was resolved previously and is now unavailable")
-def given_source_disappears(context) -> None:
-    given_external_source(context)
-    when_resolve_repository_context(context)
-    context.external.unlink()
-
-
-@when("the host requests extension context again")
-def when_resolve_again(context) -> None:
+@then("a repeated initialization does not truncate it")
+def then_no_truncate(context) -> None:
+    before = context.source.read_bytes()
     capture(
         context,
-        lambda: context.system.resolve_extension_context(
-            "zpp", "work", ConfigurationTarget.repository("repo-1")
+        lambda: context.system.initialize_extension_document(
+            "extension",
+            context.source,
+            codec="yaml",
+            layout="dedicated",
+            initial={},
         ),
     )
-
-
-@then("OpenLease fails the request without returning cached source content")
-def then_no_stale_context(context) -> None:
     assert isinstance(context.error, InvalidRequest)
-    assert context.result is None
+    assert context.source.read_bytes() == before
 
 
-@then(
-    "independent lock, release, recovery, and reconciliation operations remain available"
-)
-def then_lifecycle_available(context) -> None:
-    assert context.system.snapshot().spaces
+@given("a prior-schema state references an authored YAML document")
+def given_prior_state(context) -> None:
+    context.authored = context.root / "authored.yaml"
+    context.authored.write_text("key: value\n", encoding="utf-8")
+    state_root = context.root / "state"
+    state_root.mkdir(exist_ok=True)
+    context.old_state = (
+        '{"schema_version":2,"generation":0,"configuration_sources":['
+        f'{{"path":{json.dumps(str(context.authored))}}}]}}\n'
+    ).encode()
+    (state_root / "state.json").write_bytes(context.old_state)
+    context.before = context.authored.read_bytes()
+    context.system = OpenLease(state_root)
 
 
-@given(
-    "rebuilt ZPP appoints one `.zpp` product root for OpenLease state and extension storage"
-)
-def given_zpp_root(context) -> None:
-    registered_system(context)
+@when("current OpenLease opens that state")
+def when_open_prior(context) -> None:
+    capture(context, context.system.snapshot)
+
+
+@then("it requests reinitialization without a compatibility decoder")
+def then_reinitialize(context) -> None:
+    assert isinstance(context.error, StateFormatError)
+    assert "reinitialize" in str(context.error)
+
+
+@then("the authored YAML document is unchanged")
+def then_authored_unchanged(context) -> None:
+    assert context.authored.read_bytes() == context.before
+
+
+@given("a current extension uses a custom product root")
+def given_product_root(context) -> None:
+    current_system(context, "zpp.traits")
     context.product_root = context.root / ".zpp"
-    context.system.set_extension_roots("zpp", product_root=context.product_root)
+    context.system.set_extension_roots("zpp.traits", product_root=context.product_root)
 
 
-@when("OpenLease resolves the ZPP extension roots")
+@when("OpenLease resolves its extension storage")
 def when_resolve_roots(context) -> None:
-    context.result = context.system.extension_roots("zpp")
+    context.roots = context.system.extension_roots("zpp.traits").data
 
 
-@then(
-    "configuration, data, and cache paths are separately namespaced beneath the appointed root"
-)
-def then_roots_namespaced(context) -> None:
-    roots = context.result.data
-    assert len({roots.configuration.path, roots.data.path, roots.cache.path}) == 3
-    assert all(
-        path.is_relative_to(context.product_root.resolve())
-        for path in (roots.configuration.path, roots.data.path, roots.cache.path)
-    )
+@then("configuration data and cache roots are separately namespaced beneath it")
+def then_namespaced_roots(context) -> None:
+    paths = {
+        context.roots.configuration.path,
+        context.roots.data.path,
+        context.roots.cache.path,
+    }
+    assert len(paths) == 3
+    assert all(path.is_relative_to(context.product_root.resolve()) for path in paths)
 
 
-@then(
-    "each resolved path reports whether it was defaulted, product-root-derived, or explicitly overridden"
-)
-def then_root_provenance(context) -> None:
-    roots = context.result.data
-    assert roots.configuration.provenance.value == "product_root"
-    assert roots.data.provenance.value == "product_root"
-    assert roots.cache.provenance.value == "product_root"
-
-
-@then("no pre-existing content is overwritten or treated as owned")
-def then_roots_not_created(context) -> None:
-    assert not context.product_root.exists()
-
-
-@given(
-    "a host appoints distinct configuration, data, and cache paths for one extension"
-)
-def given_independent_roots(context) -> None:
-    registered_system(context)
-    context.paths = tuple(context.root / name for name in ("cfg", "data", "cache"))
-    context.system.set_extension_roots(
-        "zpp",
-        configuration_root=context.paths[0],
-        data_root=context.paths[1],
-        cache_root=context.paths[2],
-    )
-
-
-@when("OpenLease resolves that extension's storage")
-def when_resolve_storage(context) -> None:
-    when_resolve_roots(context)
-
-
-@then("it returns each exact canonical path with its separate role and provenance")
-def then_independent_roots(context) -> None:
-    roots = context.result.data
-    assert (roots.configuration.path, roots.data.path, roots.cache.path) == tuple(
-        item.resolve() for item in context.paths
-    )
-    assert all(
-        item.provenance.value == "explicit"
-        for item in (roots.configuration, roots.data, roots.cache)
-    )
-
-
-@then("keeps other extension namespaces inaccessible")
-def then_other_namespace_inaccessible(context) -> None:
-    capture(context, lambda: context.system.extension_roots("other"))
-    assert isinstance(context.error, InvalidRequest)
-
-
-@given("repo 2 depends on an OpenSpec authority hosted by repo 3")
-def given_repo_dependency(context) -> None:
-    basic_context(context)
-
-
-@given("both repositories have configuration for the same extension")
-def given_dependency_configuration(context) -> None:
-    bind(context, "consumer", "repository", "repo-2")
-    bind(context, "provider", "authority", "shared")
-
-
-@when("the host requests repo 2 context")
-def when_resolve_consumer(context) -> None:
-    context.consumer = context.system.resolve_extension_context(
-        "zpp", "work", ConfigurationTarget.repository("repo-2")
-    )
-
-
-@then("the dependency relationship is reported")
-def then_dependency_reported(context) -> None:
-    assert any(
-        item.kind == "dependency"
-        and item.source_id == "repo-2"
-        and item.target_id == "shared"
-        for item in context.consumer.data.context.relationships
-    )
-
-
-@then("repo 3 configuration is excluded")
-def then_provider_excluded(context) -> None:
-    assert tuple(
-        item.identifier for item in context.consumer.data.context.documents
-    ) == ("consumer",)
-
-
-@when("the host explicitly requests the repo 3 provider authority")
-def when_resolve_provider(context) -> None:
-    context.provider = context.system.resolve_extension_context(
-        "zpp", "work", ConfigurationTarget.authority("shared")
-    )
-
-
-@then("OpenLease resolves repo 3 through its own scope chain")
-def then_provider_resolved(context) -> None:
-    assert tuple(
-        item.identifier for item in context.provider.data.context.documents
-    ) == ("provider",)
-
-
-@given("a registered extension fails while interpreting an immutable context")
-def given_failing_resolver(context) -> None:
-    def fail(_context):
-        raise RuntimeError("extension failed")
-
-    registered_system(context, fail)
-    ensure_topology(context)
-    space(context, "work", authorities=("a",))
-    context.before = context.system.snapshot()
-
-
-@when("OpenLease reports the extension request failure")
-def when_resolver_fails(context) -> None:
-    capture(
-        context,
-        lambda: context.system.resolve_extension_context(
-            "zpp", "work", ConfigurationTarget.authority("a")
-        ),
-    )
-
-
-@then("the extension has not acquired or released leases")
-def then_failure_no_leases(context) -> None:
-    assert context.system.snapshot().leases == context.before.leases
-
-
-@then(
-    "has not changed topology, affected claims, worktree destinations, lifecycle state, or reconciliation state"
-)
-def then_failure_no_mutation(context) -> None:
-    assert context.system.snapshot() == context.before
-
-
-@then("the owner can continue independent lifecycle operations")
-def then_owner_continues(context) -> None:
-    assert context.system.lockable("work").data["lockable"]
+@then("no ZPP-specific home resolver is required")
+def then_no_zpp_resolver(context) -> None:
+    assert "zpp" not in type(context.system).__module__

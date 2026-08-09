@@ -118,6 +118,9 @@ class ConfigurationSourceRecord:
     source_kind: str
     path: str
     repository_id: str | None = None
+    codec: str = ""
+    layout: str = ""
+    writable: bool = False
     order: int = 0
     revision: int = 0
 
@@ -146,7 +149,7 @@ class OpenLeaseState:
     configuration_packs: tuple[ConfigurationPackRecord, ...] = ()
     configuration_sources: tuple[ConfigurationSourceRecord, ...] = ()
     space_pack_attachments: tuple[SpacePackAttachmentRecord, ...] = ()
-    schema_version: int = 2
+    schema_version: int = 3
 
 
 def structural_key(value: object) -> str:
@@ -193,16 +196,18 @@ def decode_state(source: bytes) -> OpenLeaseState:
         "leases",
         "reconciliations",
     }
-    version_two_keys = common_keys | {
+    current_keys = common_keys | {
         "configuration_generation",
         "extension_roots",
         "configuration_packs",
         "configuration_sources",
         "space_pack_attachments",
     }
-    if schema_version not in {1, 2}:
-        raise StateFormatError("unsupported OpenLease state schema")
-    _require_keys(value, common_keys if schema_version == 1 else version_two_keys)
+    if schema_version != 3:
+        raise StateFormatError(
+            "unsupported OpenLease state schema; reinitialize OpenLease state"
+        )
+    _require_keys(value, current_keys)
     generation = value.get("generation")
     if (
         not isinstance(generation, int)
@@ -308,8 +313,10 @@ def encode_state(state: OpenLeaseState) -> bytes:
 
 
 def validate_state(state: OpenLeaseState) -> OpenLeaseState:
-    if state.schema_version != 2:
-        raise StateFormatError("unsupported OpenLease state schema")
+    if state.schema_version != 3:
+        raise StateFormatError(
+            "unsupported OpenLease state schema; reinitialize OpenLease state"
+        )
     _nonnegative_int(state.configuration_generation, "configuration generation")
     repository_ids = [item.identifier for item in state.repositories]
     authority_ids = [item.identifier for item in state.authorities]
@@ -366,6 +373,7 @@ def validate_state(state: OpenLeaseState) -> OpenLeaseState:
     if len(source_keys) != len(set(source_keys)):
         raise StateFormatError("duplicate configuration source")
     known_packs = set(pack_keys)
+    physical_sources: dict[tuple[str, str | None, str], ConfigurationSourceRecord] = {}
     for source in state.configuration_sources:
         if source.scope_kind not in {
             "machine",
@@ -379,6 +387,16 @@ def validate_state(state: OpenLeaseState) -> OpenLeaseState:
             raise StateFormatError("invalid configuration source kind")
         _nonnegative_int(source.order, "configuration source order")
         _nonnegative_int(source.revision, "configuration source revision")
+        if not source.codec:
+            raise StateFormatError(
+                "configuration source is missing its current codec; reinitialize state"
+            )
+        if source.layout not in {"shared", "dedicated"}:
+            raise StateFormatError(
+                "configuration source is missing its current layout; reinitialize state"
+            )
+        if not isinstance(source.writable, bool):
+            raise StateFormatError("invalid configuration source write authority")
         if source.scope_kind == "machine" and source.scope_id is not None:
             raise StateFormatError("machine source cannot have a scope identifier")
         if source.scope_kind != "machine" and source.scope_id is None:
@@ -419,6 +437,19 @@ def validate_state(state: OpenLeaseState) -> OpenLeaseState:
                 raise StateFormatError(
                     "external configuration source path must be absolute"
                 )
+        physical_key = (source.source_kind, source.repository_id, source.path)
+        existing_physical = physical_sources.get(physical_key)
+        if existing_physical is not None:
+            if "dedicated" in {existing_physical.layout, source.layout}:
+                raise StateFormatError(
+                    "dedicated configuration document has multiple bindings"
+                )
+            if existing_physical.codec != source.codec:
+                raise StateFormatError(
+                    "shared configuration document has incompatible codecs"
+                )
+        else:
+            physical_sources[physical_key] = source
     attachment_keys = [
         (item.space_id, item.extension_id, item.pack_id)
         for item in state.space_pack_attachments
@@ -640,6 +671,9 @@ def _configuration_source(value: dict[str, Any]) -> ConfigurationSourceRecord:
             "source_kind",
             "path",
             "repository_id",
+            "codec",
+            "layout",
+            "writable",
             "order",
             "revision",
         },
@@ -653,6 +687,11 @@ def _configuration_source(value: dict[str, Any]) -> ConfigurationSourceRecord:
         path=_string(value.get("path"), "configuration source path"),
         repository_id=_optional_string(
             value.get("repository_id"), "source repository identifier"
+        ),
+        codec=_string(value.get("codec"), "configuration source codec"),
+        layout=_string(value.get("layout"), "configuration source layout"),
+        writable=_boolean(
+            value.get("writable"), "configuration source write authority"
         ),
         order=_nonnegative_int(value.get("order", 0), "configuration source order"),
         revision=_nonnegative_int(
@@ -701,6 +740,12 @@ def _string_tuple(value: object, name: str) -> tuple[str, ...]:
     if not isinstance(value, list):
         raise StateFormatError(f"invalid {name}")
     return tuple(_string(item, name) for item in value)
+
+
+def _boolean(value: object, name: str) -> bool:
+    if not isinstance(value, bool):
+        raise StateFormatError(f"invalid {name}")
+    return value
 
 
 def _nonnegative_int(value: object, name: str) -> int:

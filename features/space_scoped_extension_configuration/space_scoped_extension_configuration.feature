@@ -1,105 +1,69 @@
 @space-scoped-extension-configuration
-Feature: Resolve extension configuration from an OpenLease space
-  Host applications can delegate generic configuration and path resolution to
-  OpenLease while retaining ownership of their product-specific semantics.
+Feature: Manage explicit extension configuration documents
+  Hosts can bind current YAML, TOML, and JSON documents without transferring
+  product semantics, lifecycle ownership, or implicit execution to OpenLease.
 
-  Scenario: Register one bounded host extension
-    Given a host explicitly registers a namespaced extension with a supported contract version
-    When the host requests that extension through OpenLease
-    Then OpenLease makes only that registered namespace available
-    And does not discover globally installed extension code
-
-  Scenario Outline: Reject an unsafe extension set before context resolution
-    Given a host supplies <registration problem>
-    When the host constructs OpenLease
-    Then OpenLease rejects the complete extension set
-    And no extension context is resolved
+  Scenario Outline: Decode equivalent explicit built-in formats
+    Given a current extension and a dedicated <codec> document
+    When the host binds that direct document read-only
+    Then the effective configuration contains the equivalent managed values
+    And no persistent space or configuration binding is created
 
     Examples:
-      | registration problem              |
-      | duplicate extension identities    |
-      | an unsupported contract version   |
+      | codec |
+      | yaml  |
+      | toml  |
+      | json  |
 
-  Scenario: Resolve nested authority configuration without sibling leakage
-    Given repo 1 has machine configuration, two ordered packs, direct space configuration, repository configuration, root authority configuration, and distinct child A and child B configuration
-    And one space targets child A
-    When the host requests child A context for its extension
-    Then the documents are ordered from machine through both packs, direct space, repository, root, and child A scopes
-    And child B configuration is excluded
-    And OpenLease preserves each opaque document for extension-owned interpretation
+  Scenario: Preserve exact shared identities and unrelated namespaces
+    Given a shared TOML document with nested zpp and exact dotted zpp.behave tables
+    When zpp.behave updates its exact shared namespace
+    Then the nested zpp table and comments remain unrelated
+    And the dotted identity remains one quoted TOML key
 
-  Scenario: Keep configuration scopes separate from lease ownership
-    Given root, child A, and child B configuration scopes participate in one durable space
-    When the host attaches a reusable configuration pack and resolves each child separately
-    Then the pack participates between machine and repository configuration for both children
-    And each resolved context identifies the participating pack and its observed generation
-    And no configuration scope or pack becomes a child space or leased authority
-    And the affected claim remains unchanged
+  Scenario: Overlay space sources shallowly in authority order
+    Given current machine repository root and child configuration bindings
+    When the host binds child A configuration
+    Then later top-level keys replace earlier complete nested values
+    And child B configuration does not participate
 
-  Scenario: Resolve immutable context against effective member paths
-    Given a successor space has one generated repository member and one pinned repository member
-    When the host requests an explicit repository or authority context
-    Then generated authorities use their recorded effective worktree paths
-    And pinned authorities use their exact recorded context paths
-    And the result includes immutable relationship, access, branch, and commit provenance
+  Scenario: Save automatically to one exact writable source
+    Given two writable sources for one space-scoped extension
+    When the host selects the lower source and assigns a shadowed key
+    Then the lower source is published without a save call
+    And the higher source remains the effective winner
 
-  Scenario: Follow repository configuration into a successor worktree
-    Given an extension source is appointed at a repository-relative path in a source checkout
-    And the selected successor records a generated worktree for that repository
-    When the host resolves extension context in the successor
-    Then OpenLease reads the same relative source beneath the effective worktree
-    And does not copy, adopt, rewrite, or lease the source
+  Scenario: Rebase an unrelated shared document change
+    Given two extensions observe different namespaces in one writable JSON document
+    When both extensions assign their own keys
+    Then both completed namespaces remain in the shared document
 
-  Scenario: Retain an exact external configuration source
-    Given a readable extension source is appointed outside every registered repository
-    When the host resolves extension context
-    Then OpenLease reads that exact canonical machine-local path
-    And does not associate the path with a repository or lease
+  Scenario: Reject a same-key conflict
+    Given two handles observe the same writable configuration key
+    When both handles assign different replacements
+    Then the second assignment reports a configuration conflict
+    And the first replacement remains authoritative
 
-  Scenario: Reject an unavailable source atomically
-    Given a custom configuration source is missing or unreadable
-    When the host appoints that source
-    Then OpenLease rejects the complete binding
-    And retains no partial configuration record
+  Scenario: Keep nested reads defensive
+    Given a direct dedicated document contains a nested mapping
+    When a caller attempts in-place mutation of the returned nested value
+    Then the value is immutable
+    And the source document remains unchanged
 
-  Scenario: Observe configuration edits live while locked
-    Given a locked space has resolved an attached configuration pack
-    When the pack content changes and the host requests context again
-    Then OpenLease returns the current content with a changed observed generation and digest
-    And does not require a refresh operation
-    And leaves the lease, graph generation, affected claim, and worktree records unchanged
+  Scenario: Initialize one missing direct document explicitly
+    Given a current extension and an absent dedicated YAML path
+    When the host explicitly initializes that writable document
+    Then exactly that document is created with the initial mapping
+    And a repeated initialization does not truncate it
 
-  Scenario: Refuse stale configuration after a source disappears
-    Given a configuration source was resolved previously and is now unavailable
-    When the host requests extension context again
-    Then OpenLease fails the request without returning cached source content
-    And independent lock, release, recovery, and reconciliation operations remain available
+  Scenario: Reject prior state without touching referenced documents
+    Given a prior-schema state references an authored YAML document
+    When current OpenLease opens that state
+    Then it requests reinitialization without a compatibility decoder
+    And the authored YAML document is unchanged
 
   Scenario: Preserve a dependent product root
-    Given rebuilt ZPP appoints one `.zpp` product root for OpenLease state and extension storage
-    When OpenLease resolves the ZPP extension roots
-    Then configuration, data, and cache paths are separately namespaced beneath the appointed root
-    And each resolved path reports whether it was defaulted, product-root-derived, or explicitly overridden
-    And no pre-existing content is overwritten or treated as owned
-
-  Scenario: Override extension roots independently
-    Given a host appoints distinct configuration, data, and cache paths for one extension
-    When OpenLease resolves that extension's storage
-    Then it returns each exact canonical path with its separate role and provenance
-    And keeps other extension namespaces inaccessible
-
-  Scenario: Keep provider configuration outside dependent context
-    Given repo 2 depends on an OpenSpec authority hosted by repo 3
-    And both repositories have configuration for the same extension
-    When the host requests repo 2 context
-    Then the dependency relationship is reported
-    And repo 3 configuration is excluded
-    When the host explicitly requests the repo 3 provider authority
-    Then OpenLease resolves repo 3 through its own scope chain
-
-  Scenario: Isolate extension failure from lifecycle authority
-    Given a registered extension fails while interpreting an immutable context
-    When OpenLease reports the extension request failure
-    Then the extension has not acquired or released leases
-    And has not changed topology, affected claims, worktree destinations, lifecycle state, or reconciliation state
-    And the owner can continue independent lifecycle operations
+    Given a current extension uses a custom product root
+    When OpenLease resolves its extension storage
+    Then configuration data and cache roots are separately namespaced beneath it
+    And no ZPP-specific home resolver is required

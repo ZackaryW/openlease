@@ -16,6 +16,14 @@ from features.support.openlease_support import (
 from openlease import (
     AuthorityConflict,
     BranchSelection,
+    CallbackEvent,
+    CallbackMode,
+    CallbackSelection,
+    ExtensionCallback,
+    ExtensionManifest,
+    ExtensionOperation,
+    ExtensionRegistration,
+    HandlerStatus,
     InvalidRequest,
     PreparationFailed,
     ReconcileSelection,
@@ -689,14 +697,15 @@ def all_legs_planned(context) -> None:
 
 @then(
     "reports divergence, dirty worktrees, missing branches, likely textual "
-    "conflicts, and verification"
+    "conflicts, intrinsic safety, and exact callback selections"
 )
 def reconciliation_evidence(context) -> None:
     leg = context.result.data["legs"][0]
     assert hasattr(leg["preview"], "ahead")
     assert "dirty" in leg
     assert hasattr(leg["preview"], "likely_conflicts")
-    assert context.result.data["verification"]["cohort"]
+    assert context.result.data["callbacks"] == ()
+    assert context.result.data["callback_evidence"]
 
 
 @then("does not mutate Git during planning")
@@ -708,6 +717,166 @@ def planning_no_mutation(context) -> None:
                 git(Path(item.source_path), "rev-parse", "HEAD")
                 == context.dest_heads[item.repository_id]
             )
+
+
+def callback_successor(context, event: CallbackEvent, *, fail: bool) -> None:
+    def callback(_invocation):
+        if fail:
+            raise RuntimeError("callback failed")
+
+    modes = (
+        (CallbackMode.OBSERVE, CallbackMode.GATE)
+        if event is CallbackEvent.RECONCILE_BEFORE_REPOSITORY
+        else (CallbackMode.OBSERVE,)
+    )
+    registration = ExtensionRegistration(
+        ExtensionManifest("zpp.behave"),
+        operations=(ExtensionOperation("verify", callback),),
+        callbacks=(ExtensionCallback(event, "verify", modes),),
+    )
+    context.system = new_system(context)
+    context.system = type(context.system)(
+        context.root / "state",
+        openspec=context.openspec,
+        extensions=(registration,),
+    )
+    released_with_change(context)
+    current = context.system.status("successor").data["spaces"][0]
+    generated = next(item for item in current.members if item.generated)
+    context.repository_id = generated.repository_id
+    context.destination = Path(generated.source_path)
+    context.destination_head = git(context.destination, "rev-parse", "HEAD")
+    context.selections = (
+        ReconcileSelection(
+            generated.repository_id,
+            git(context.destination, "branch", "--show-current"),
+            IntegrationStrategy.MERGE,
+        ),
+    )
+
+
+@when("the owner plans reconciliation without selecting callbacks")
+def plan_without_callbacks(context) -> None:
+    plan_merge_path(context)
+
+
+@then("no registered or configured extension operation becomes required work")
+def no_callback_work(context) -> None:
+    assert context.result.data["callbacks"] == ()
+
+
+@then("intrinsic OpenLease Git and ownership checks remain active")
+def intrinsic_checks_remain(context) -> None:
+    leg = context.result.data["legs"][0]
+    assert "dirty" in leg
+    assert hasattr(leg["preview"], "likely_conflicts")
+
+
+@given("a released successor and a registered failing pre-repository callback")
+def given_failing_pre_callback(context) -> None:
+    callback_successor(context, CallbackEvent.RECONCILE_BEFORE_REPOSITORY, fail=True)
+
+
+@when("the owner selects that callback as a gate and applies reconciliation")
+def apply_pre_gate(context) -> None:
+    callback = CallbackSelection(
+        "zpp.behave",
+        "verify",
+        CallbackEvent.RECONCILE_BEFORE_REPOSITORY,
+        CallbackMode.GATE,
+        context.repository_id,
+    )
+    capture(
+        context,
+        lambda: context.system.reconcile_apply(
+            "successor", context.selections, (callback,)
+        ),
+    )
+
+
+@then("OpenLease records the failed callback outcome before Git mutation")
+def failed_gate_recorded(context) -> None:
+    outcomes = context.system.inspect_extension_outcomes("zpp.behave")
+    assert outcomes[-1]["handler_status"] == HandlerStatus.FAILED.value
+    assert git(context.destination, "rev-parse", "HEAD") == context.destination_head
+
+
+@then("the repository remains pending and unintegrated")
+def gate_leaves_pending(context) -> None:
+    record = next(
+        item
+        for item in context.system.snapshot().reconciliations
+        if item.space_id == "successor" and item.repository_id == context.repository_id
+    )
+    assert record.status == "pending"
+
+
+@given("a released successor and a registered failing post-repository callback")
+def given_failing_post_callback(context) -> None:
+    callback_successor(context, CallbackEvent.RECONCILE_AFTER_REPOSITORY, fail=True)
+
+
+@when("the owner selects that callback observationally and applies reconciliation")
+def apply_post_observer(context) -> None:
+    callback = CallbackSelection(
+        "zpp.behave",
+        "verify",
+        CallbackEvent.RECONCILE_AFTER_REPOSITORY,
+        CallbackMode.OBSERVE,
+        context.repository_id,
+    )
+    context.result = context.system.reconcile_apply(
+        "successor", context.selections, (callback,)
+    )
+
+
+@then("the repository remains ordinarily reconciled")
+def observer_keeps_reconciled(context) -> None:
+    record = next(
+        item
+        for item in context.system.snapshot().reconciliations
+        if item.space_id == "successor" and item.repository_id == context.repository_id
+    )
+    assert record.status == "reconciled"
+
+
+@then("the callback failure is reported without an unverified lifecycle state")
+def observer_failure_separate(context) -> None:
+    outcome = context.result.data["callback_outcomes"][0]
+    assert outcome.handler_status is HandlerStatus.FAILED
+    assert {item.status for item in context.system.snapshot().reconciliations} <= {
+        "pending",
+        "reconciled",
+        "abandoned",
+    }
+
+
+@given("a released successor and a registered post-repository callback")
+def given_post_callback(context) -> None:
+    callback_successor(context, CallbackEvent.RECONCILE_AFTER_REPOSITORY, fail=False)
+
+
+@when("the owner selects that callback as a gate while planning")
+def plan_post_gate(context) -> None:
+    callback = CallbackSelection(
+        "zpp.behave",
+        "verify",
+        CallbackEvent.RECONCILE_AFTER_REPOSITORY,
+        CallbackMode.GATE,
+        context.repository_id,
+    )
+    capture(
+        context,
+        lambda: context.system.reconcile_plan(
+            "successor", context.selections, (callback,)
+        ),
+    )
+
+
+@then("OpenLease rejects the unsupported mode before Git mutation")
+def post_gate_rejected(context) -> None:
+    assert isinstance(context.error, InvalidRequest)
+    assert git(context.destination, "rev-parse", "HEAD") == context.destination_head
 
 
 @given("repo 2 depends on the affected authority hosted by repo 3")

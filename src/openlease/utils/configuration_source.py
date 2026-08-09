@@ -19,6 +19,9 @@ class ConfigurationDocument:
     resolved_path: str
     order: int
     binding_revision: int
+    codec: str
+    layout: str
+    writable: bool
     source_kind: SourceKind
     repository_id: str | None
     content: bytes
@@ -60,6 +63,9 @@ class ConfigurationSourceReader:
                 resolved_path=str(path),
                 order=source.order,
                 binding_revision=source.binding_revision,
+                codec=source.codec,
+                layout=source.layout,
+                writable=source.writable,
                 source_kind=source.source_kind,
                 repository_id=source.repository_id,
                 content=content,

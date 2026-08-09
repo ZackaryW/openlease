@@ -5,6 +5,13 @@ import pytest
 
 from openlease import (
     AuthorityConflict,
+    CallbackEvent,
+    CallbackMode,
+    CallbackSelection,
+    ExtensionCallback,
+    ExtensionManifest,
+    ExtensionOperation,
+    ExtensionRegistration,
     OpenLease,
     PreparationFailed,
     ReconcileSelection,
@@ -55,7 +62,7 @@ class MemoryOpenSpec:
 
 
 def _system(
-    tmp_path: Path, *, verifier=None
+    tmp_path: Path, *, extensions=()
 ) -> tuple[OpenLease, dict[str, Path], MemoryOpenSpec]:
     repos = {
         name: _repository(tmp_path / name) for name in ("repo-1", "repo-2", "repo-3")
@@ -65,7 +72,7 @@ def _system(
         tmp_path / "state",
         worktree_base=tmp_path / "worktrees",
         openspec=openspec,  # type: ignore[arg-type]
-        verifier=verifier,
+        extensions=extensions,
     )
     for name, path in repos.items():
         system.register_repository(name, path)
@@ -226,13 +233,30 @@ def test_repeated_lock_is_a_compatible_noop(tmp_path: Path) -> None:
     assert second.changed is False
 
 
-def test_reconciliation_verifies_each_repository_and_the_complete_cohort(
+def test_reconciliation_dispatches_only_selected_callbacks_in_event_order(
     tmp_path: Path,
 ) -> None:
-    verified: list[tuple[str, tuple[Path, ...]]] = []
+    observed: list[tuple[CallbackEvent, str | None]] = []
+
+    def observe(invocation):
+        observed.append((invocation.event.event, invocation.event.repository_id))
+
+    registration = ExtensionRegistration(
+        ExtensionManifest("zpp.behave"),
+        operations=(ExtensionOperation("verify", observe),),
+        callbacks=(
+            ExtensionCallback(
+                CallbackEvent.RECONCILE_BEFORE_REPOSITORY,
+                "verify",
+                (CallbackMode.OBSERVE, CallbackMode.GATE),
+            ),
+            ExtensionCallback(CallbackEvent.RECONCILE_AFTER_REPOSITORY, "verify"),
+            ExtensionCallback(CallbackEvent.RECONCILE_AFTER_COHORT, "verify"),
+        ),
+    )
     system, repos, _ = _system(
         tmp_path,
-        verifier=lambda scope, paths: verified.append((scope, paths)),
+        extensions=(registration,),
     )
     _space(system, "blocker", "a")
     system.lock("blocker")
@@ -253,7 +277,33 @@ def test_reconciliation_verifies_each_repository_and_the_complete_cohort(
         IntegrationStrategy.MERGE,
     )
 
-    result = system.reconcile_apply("successor", (selection,))
+    callbacks = (
+        CallbackSelection(
+            "zpp.behave",
+            "verify",
+            CallbackEvent.RECONCILE_BEFORE_REPOSITORY,
+            CallbackMode.GATE,
+            "repo-1",
+        ),
+        CallbackSelection(
+            "zpp.behave",
+            "verify",
+            CallbackEvent.RECONCILE_AFTER_REPOSITORY,
+            CallbackMode.OBSERVE,
+            "repo-1",
+        ),
+        CallbackSelection(
+            "zpp.behave",
+            "verify",
+            CallbackEvent.RECONCILE_AFTER_COHORT,
+            CallbackMode.OBSERVE,
+        ),
+    )
+    result = system.reconcile_apply("successor", (selection,), callbacks)
 
-    assert result.data == {"completed": ["repo-1"]}
-    assert [scope for scope, _ in verified] == ["repo-1", "cohort"]
+    assert result.data["completed"] == ["repo-1"]
+    assert observed == [
+        (CallbackEvent.RECONCILE_BEFORE_REPOSITORY, "repo-1"),
+        (CallbackEvent.RECONCILE_AFTER_REPOSITORY, "repo-1"),
+        (CallbackEvent.RECONCILE_AFTER_COHORT, None),
+    ]

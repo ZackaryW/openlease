@@ -91,6 +91,9 @@ class PlannedSource:
     repository_id: str | None
     order: int
     binding_revision: int
+    codec: str
+    layout: str
+    writable: bool
     source_kind: SourceKind = SourceKind.EXTERNAL
 
 
@@ -298,5 +301,8 @@ def _planned_source(
         repository_id=source.repository_id,
         order=source.order,
         binding_revision=source.revision,
+        codec=source.codec,
+        layout=source.layout,
+        writable=source.writable,
         source_kind=SourceKind(source.source_kind),
     )

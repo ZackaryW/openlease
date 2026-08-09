@@ -1,10 +1,18 @@
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
+from hashlib import sha256
 from pathlib import Path
 from typing import Literal
 
+from openlease.configuration_codec import (
+    CodecError,
+    CodecRegistry,
+    ConfigurationLayout,
+    ManagedValue,
+    project_namespace,
+)
 from openlease.core.configuration import (
     ConfigurationError,
     ConfigurationTarget,
@@ -62,19 +70,21 @@ from openlease.errors import (
 )
 from openlease.extension import (
     EXTENSION_CONTRACT_VERSION,
+    CallbackEvent,
+    CallbackMode,
+    CallbackSelection,
+    DirectDocumentTarget,
     ExtensionAuthority,
     ExtensionContext,
+    ExtensionEvent,
     ExtensionMember,
     ExtensionPack,
     ExtensionRegistration,
     ExtensionRelationship,
-    ExtensionResolution,
+    HandlerStatus,
 )
+from openlease.extension_runtime import ExtensionRuntime, RuntimeBinding
 from openlease.result import CommandResult
-from openlease.utils.configuration_source import (
-    ConfigurationDocument,
-    ConfigurationSourceReader,
-)
 from openlease.utils.git_adapter import (
     GitAdapter,
     IntegrationStrategy,
@@ -115,9 +125,7 @@ class OpenLease:
         worktree_base: Path | None = None,
         git: GitAdapter | None = None,
         openspec: OpenSpecAdapter | None = None,
-        verifier: Callable[[str, tuple[Path, ...]], None] | None = None,
         extensions: tuple[ExtensionRegistration, ...] = (),
-        configuration_reader: ConfigurationSourceReader | None = None,
     ) -> None:
         self.state_root = state_root.resolve()
         self.worktree_base = (
@@ -126,13 +134,212 @@ class OpenLease:
         self.repository = StateRepository(self.state_root)
         self.git = git or GitAdapter()
         self.openspec = openspec or OpenSpecAdapter()
-        self.verifier = verifier or self._verify_clean_checkouts
         self._extensions = self._validate_extensions(extensions)
-        self.configuration_reader = configuration_reader or ConfigurationSourceReader()
+        try:
+            self.codecs = CodecRegistry(
+                tuple(codec for item in extensions for codec in item.codecs)
+            )
+        except CodecError as error:
+            raise InvalidRequest(str(error)) from error
+        self.extension_runtime = ExtensionRuntime(
+            self.state_root, self._extensions, self.codecs
+        )
 
     @property
     def registered_extensions(self) -> tuple[str, ...]:
         return tuple(self._extensions)
+
+    def bind_extension_document(
+        self,
+        extension_id: str,
+        path: Path,
+        *,
+        codec: str,
+        layout: ConfigurationLayout | str,
+        writable: bool = False,
+        repository_path: Path | None = None,
+    ):
+        registration = self._extension(extension_id)
+        try:
+            selected_layout = ConfigurationLayout(layout)
+            self.codecs.require(codec)
+            canonical = path.resolve(strict=True)
+        except (CodecError, OSError, ValueError) as error:
+            raise InvalidRequest(
+                f"invalid direct configuration binding: {error}"
+            ) from error
+        if not canonical.is_file():
+            raise InvalidRequest(f"configuration source is not a file: {canonical}")
+        state = self.snapshot()
+        context = ExtensionContext(
+            extension_id=extension_id,
+            target_kind="direct",
+            target=DirectDocumentTarget(
+                canonical,
+                repository_path.resolve() if repository_path is not None else None,
+            ),
+            state_generation=None,
+            configuration_generation=None,
+            roots=self._resolved_extension_roots(state, extension_id),
+        )
+        binding = RuntimeBinding(
+            identifier=f"direct:{sha256(str(canonical).encode()).hexdigest()[:16]}",
+            extension_id=extension_id,
+            path=canonical,
+            codec=codec,
+            layout=selected_layout,
+            writable=writable,
+        )
+        return self.extension_runtime.bind(
+            registration,
+            context,
+            (binding,),
+            writable_source=binding.identifier if writable else None,
+        )
+
+    def initialize_extension_document(
+        self,
+        extension_id: str,
+        path: Path,
+        *,
+        codec: str,
+        layout: ConfigurationLayout | str,
+        initial: Mapping[str, ManagedValue],
+        repository_path: Path | None = None,
+        boundary: Path | None = None,
+        create_parents: bool = False,
+    ):
+        registration = self._extension(extension_id)
+        try:
+            selected_layout = ConfigurationLayout(layout)
+            self.codecs.require(codec)
+        except (CodecError, ValueError) as error:
+            raise InvalidRequest(
+                f"invalid direct configuration binding: {error}"
+            ) from error
+        absolute = path.absolute()
+        permitted = (boundary or absolute.parent).resolve()
+        if permitted.parent == permitted:
+            raise InvalidRequest("configuration initialization boundary is too broad")
+        resolved_parent = absolute.parent.resolve()
+        try:
+            resolved_parent.relative_to(permitted)
+        except ValueError as error:
+            raise InvalidRequest(
+                "configuration initialization escapes its permitted boundary"
+            ) from error
+        if not resolved_parent.exists():
+            if not create_parents:
+                raise InvalidRequest(
+                    f"configuration parent does not exist: {resolved_parent}"
+                )
+            resolved_parent.mkdir(parents=True)
+        if not resolved_parent.is_dir():
+            raise InvalidRequest(
+                f"configuration parent is not a directory: {resolved_parent}"
+            )
+        absolute = resolved_parent / absolute.name
+        binding = RuntimeBinding(
+            identifier=f"direct:{sha256(str(absolute).encode()).hexdigest()[:16]}",
+            extension_id=extension_id,
+            path=absolute,
+            codec=codec,
+            layout=selected_layout,
+            writable=True,
+        )
+        try:
+            self.extension_runtime.publisher.initialize(
+                binding, initial, validator=registration.validator
+            )
+        except (CodecError, OSError) as error:
+            raise InvalidRequest(
+                f"configuration initialization failed: {error}"
+            ) from error
+        return self.bind_extension_document(
+            extension_id,
+            absolute,
+            codec=codec,
+            layout=selected_layout,
+            writable=True,
+            repository_path=repository_path,
+        )
+
+    def inspect_extension_outcomes(self, extension_id: str):
+        self._extension(extension_id)
+        state = self.snapshot()
+        roots = self._resolved_extension_roots(state, extension_id)
+        return self.extension_runtime.outcomes(extension_id, roots.data.path)
+
+    def bind_extension(
+        self,
+        extension_id: str,
+        space_id: str,
+        target: ConfigurationTarget,
+        *,
+        writable_source: str | None = None,
+        writable_scope: tuple[str, str | None] | None = None,
+    ):
+        registration = self._extension(extension_id)
+        state = self.snapshot()
+        try:
+            planned = plan_configuration_sources(state, extension_id, space_id, target)
+        except ConfigurationError as error:
+            raise InvalidRequest(str(error)) from error
+        bindings = tuple(
+            RuntimeBinding(
+                identifier=item.identifier,
+                extension_id=item.extension_id,
+                path=item.resolved_path,
+                codec=item.codec,
+                layout=ConfigurationLayout(item.layout),
+                writable=item.writable,
+                scope_kind=item.scope_kind,
+                scope_id=item.scope_id,
+                order=item.order,
+                revision=item.binding_revision,
+            )
+            for item in planned
+        )
+        if writable_source is not None and writable_scope is not None:
+            raise InvalidRequest("select a writable source or scope, not both")
+        if writable_scope is not None:
+            matching = tuple(
+                item
+                for item in bindings
+                if item.writable and (item.scope_kind, item.scope_id) == writable_scope
+            )
+            if len(matching) != 1:
+                raise InvalidRequest(
+                    "writable configuration scope is absent or ambiguous"
+                )
+            writable_source = matching[0].identifier
+        context = self._extension_context(state, extension_id, space_id, target)
+        return self.extension_runtime.bind(
+            registration,
+            context,
+            bindings,
+            writable_source=writable_source,
+        )
+
+    def invoke_extension(
+        self,
+        extension_id: str,
+        operation: str,
+        *,
+        space_id: str,
+        target: ConfigurationTarget,
+        input: object = None,
+        writable_source: str | None = None,
+        writable_scope: tuple[str, str | None] | None = None,
+    ):
+        bound = self.bind_extension(
+            extension_id,
+            space_id,
+            target,
+            writable_source=writable_source,
+            writable_scope=writable_scope,
+        )
+        return bound.invoke(operation, input)
 
     def snapshot(self) -> OpenLeaseState:
         return self.repository.load()
@@ -435,9 +642,18 @@ class OpenLease:
         scope_kind: str,
         scope_id: str | None = None,
         *,
+        codec: str,
+        layout: str,
+        writable: bool = False,
         order: int = 0,
     ) -> CommandResult:
-        self._extension(extension_id)
+        registration = self._extension(extension_id)
+        try:
+            self.codecs.require(codec)
+        except CodecError as error:
+            raise InvalidRequest(str(error)) from error
+        if layout not in {"shared", "dedicated"}:
+            raise InvalidRequest("configuration layout must be shared or dedicated")
         if order < 0:
             raise InvalidRequest("configuration source order must be nonnegative")
         observed = self.snapshot()
@@ -451,6 +667,20 @@ class OpenLease:
             )
         except ConfigurationError as error:
             raise InvalidRequest(str(error)) from error
+        try:
+            selected = project_namespace(
+                self.codecs.require(codec),
+                self.codecs.require(codec).decode(source.resolve().read_bytes()),
+                extension_id,
+                ConfigurationLayout(layout),
+            )
+            if registration.validator is not None:
+                registration.validator(selected)
+        except (OSError, CodecError, ValueError) as error:
+            raise InvalidRequest(
+                f"invalid {codec} configuration binding: {identifier}",
+                details={"error": str(error)},
+            ) from error
 
         def transform(state: OpenLeaseState) -> OpenLeaseState:
             existing = next(
@@ -475,6 +705,9 @@ class OpenLease:
                     else str(bound.path)
                 ),
                 repository_id=bound.repository_id,
+                codec=codec,
+                layout=layout,
+                writable=writable,
                 order=order,
                 revision=revision,
             )
@@ -536,47 +769,6 @@ class OpenLease:
             changed=updated.configuration_generation != before.configuration_generation,
             data={"extension": extension_id, "source": identifier},
         )
-
-    def resolve_extension_context(
-        self,
-        extension_id: str,
-        space_id: str,
-        target: ConfigurationTarget,
-    ) -> CommandResult:
-        registration = self._extension(extension_id)
-        for _attempt in range(4):
-            state = self.snapshot()
-            try:
-                planned = plan_configuration_sources(
-                    state, extension_id, space_id, target
-                )
-                documents = tuple(
-                    self.configuration_reader.read(item) for item in planned
-                )
-                context = self._extension_context(
-                    state, extension_id, space_id, target, documents
-                )
-            except (ConfigurationError, StopIteration) as error:
-                raise InvalidRequest(str(error)) from error
-            if self.snapshot().generation != state.generation:
-                continue
-            try:
-                value = (
-                    registration.resolver(context)
-                    if registration.resolver is not None
-                    else None
-                )
-            except Exception as error:
-                raise InvalidRequest(
-                    f"extension resolution failed: {extension_id}",
-                    details={"error": str(error)},
-                ) from error
-            return CommandResult(
-                "resolve_extension_context",
-                changed=False,
-                data=ExtensionResolution(context, value),
-            )
-        raise InvalidRequest("state changed repeatedly during extension resolution")
 
     def select_space(self, identifier: str) -> CommandResult:
         state = self.snapshot()
@@ -894,7 +1086,10 @@ class OpenLease:
         )
 
     def reconcile_plan(
-        self, space_id: str, selections: tuple[ReconcileSelection, ...]
+        self,
+        space_id: str,
+        selections: tuple[ReconcileSelection, ...],
+        callbacks: tuple[CallbackSelection, ...] = (),
     ) -> CommandResult:
         state = self.snapshot()
         space = self._space(state, space_id)
@@ -919,6 +1114,9 @@ class OpenLease:
         default_order = dependency_order(
             tuple(member.repository_id for member in generated),
             repository_dependencies,
+        )
+        callback_plan = self._validate_callback_selections(
+            tuple(member.repository_id for member in generated), callbacks
         )
         previews = []
         for member in generated:
@@ -947,22 +1145,32 @@ class OpenLease:
             data={
                 "default_order": default_order,
                 "legs": tuple(previews),
-                "verification": {
-                    "repository": "configured verifier after each completed leg",
-                    "cohort": "configured verifier after every selected leg",
-                },
+                "callbacks": callback_plan,
+                "callback_evidence": structural_key(callback_plan),
             },
         )
 
     def reconcile_apply(
-        self, space_id: str, selections: tuple[ReconcileSelection, ...]
+        self,
+        space_id: str,
+        selections: tuple[ReconcileSelection, ...],
+        callbacks: tuple[CallbackSelection, ...] = (),
+        *,
+        expected_callback_evidence: str | None = None,
     ) -> CommandResult:
-        plan = self.reconcile_plan(space_id, selections)
+        plan = self.reconcile_plan(space_id, selections, callbacks)
+        current_evidence = plan.data["callback_evidence"]  # type: ignore[index]
+        if (
+            expected_callback_evidence is not None
+            and current_evidence != expected_callback_evidence
+        ):
+            raise InvalidRequest("reconciliation callback registration or target drift")
         state = self.snapshot()
         space = self._space(state, space_id)
         members = {item.repository_id: item for item in space.members if item.generated}
         selection_by_repo = {item.repository_id: item for item in selections}
         completed: list[str] = []
+        callback_outcomes = []
         for repository_id in plan.data["default_order"]:  # type: ignore[index]
             member = members[repository_id]
             selection = selection_by_repo[repository_id]
@@ -976,6 +1184,25 @@ class OpenLease:
                     source_checkout=Path(member.effective_path),
                 )
             )
+            before = tuple(
+                item
+                for item in callbacks
+                if item.event is CallbackEvent.RECONCILE_BEFORE_REPOSITORY
+                and item.repository_id == repository_id
+            )
+            for callback in before:
+                result = self._dispatch_reconcile_callback(
+                    space_id, repository_id, callback
+                )
+                callback_outcomes.append(result)
+                if (
+                    callback.mode is CallbackMode.GATE
+                    and result.handler_status is HandlerStatus.FAILED
+                ):
+                    raise InvalidRequest(
+                        f"reconciliation gated before {repository_id}",
+                        details={"completed": tuple(completed), "callback": callback},
+                    )
             try:
                 result = self.git.apply_integration(
                     MergeLeg(
@@ -1000,7 +1227,6 @@ class OpenLease:
                         ),
                     },
                 ) from error
-            self.verifier(repository_id, (destination_path,))
 
             def transform(
                 current: OpenLeaseState,
@@ -1028,13 +1254,31 @@ class OpenLease:
             current = self.snapshot()
             self.repository.mutate(current.generation, transform)
             completed.append(repository_id)
-        destination_paths = tuple(
-            selection_by_repo[repository_id].destination_path
-            or Path(members[repository_id].source_path)
-            for repository_id in completed
+            after = tuple(
+                item
+                for item in callbacks
+                if item.event is CallbackEvent.RECONCILE_AFTER_REPOSITORY
+                and item.repository_id == repository_id
+            )
+            for callback in after:
+                callback_outcomes.append(
+                    self._dispatch_reconcile_callback(space_id, repository_id, callback)
+                )
+        cohort_repository = completed[0] if completed else None
+        for callback in callbacks:
+            if callback.event is CallbackEvent.RECONCILE_AFTER_COHORT:
+                callback_outcomes.append(
+                    self._dispatch_reconcile_callback(
+                        space_id, cohort_repository, callback
+                    )
+                )
+        return CommandResult(
+            "reconcile_apply",
+            data={
+                "completed": completed,
+                "callback_outcomes": tuple(callback_outcomes),
+            },
         )
-        self.verifier("cohort", destination_paths)
-        return CommandResult("reconcile_apply", data={"completed": completed})
 
     def abandon_member(self, space_id: str, repository_id: str) -> CommandResult:
         def transform(state: OpenLeaseState) -> OpenLeaseState:
@@ -1587,18 +1831,6 @@ class OpenLease:
                 issues.append(f"pinned member drifted: {member.repository_id}")
         return tuple(issues)
 
-    def _verify_clean_checkouts(self, scope: str, paths: tuple[Path, ...]) -> None:
-        dirty = tuple(
-            str(checkout.root)
-            for checkout in (self.git.inspect(path) for path in paths)
-            if checkout.dirty
-        )
-        if dirty:
-            raise InvalidRequest(
-                f"{scope} verification found dirty integration destinations",
-                details={"dirty": dirty},
-            )
-
     def _member_status(self, space: SpaceRecord) -> tuple[dict[str, object], ...]:
         results: list[dict[str, object]] = []
         for member in space.members:
@@ -1758,6 +1990,117 @@ class OpenLease:
         return space
 
     @staticmethod
+    def _callback_key(selection: CallbackSelection) -> tuple[object, ...]:
+        return (
+            selection.extension_id,
+            selection.operation,
+            selection.event,
+            selection.mode,
+            selection.repository_id,
+        )
+
+    def _validate_callback_selections(
+        self,
+        repositories: tuple[str, ...],
+        callbacks: tuple[CallbackSelection, ...],
+    ) -> tuple[dict[str, object], ...]:
+        if len({self._callback_key(item) for item in callbacks}) != len(callbacks):
+            raise InvalidRequest("duplicate reconciliation callback selection")
+        planned = []
+        for order, selection in enumerate(callbacks):
+            registration = self._extension(selection.extension_id)
+            available = next(
+                (
+                    item
+                    for item in registration.callbacks
+                    if item.event is selection.event
+                    and item.operation == selection.operation
+                ),
+                None,
+            )
+            if available is None or selection.mode not in available.modes:
+                raise InvalidRequest(
+                    "reconciliation callback is not registered for the selected mode"
+                )
+            if (
+                selection.event is not CallbackEvent.RECONCILE_BEFORE_REPOSITORY
+                and selection.mode is CallbackMode.GATE
+            ):
+                raise InvalidRequest("post-mutation reconciliation gate is unsupported")
+            repository_event = selection.event in {
+                CallbackEvent.RECONCILE_BEFORE_REPOSITORY,
+                CallbackEvent.RECONCILE_AFTER_REPOSITORY,
+            }
+            if repository_event and selection.repository_id not in repositories:
+                raise InvalidRequest("repository callback target is not selected")
+            if not repository_event and selection.repository_id is not None:
+                raise InvalidRequest("cohort callback cannot target one repository")
+            planned.append(
+                {
+                    "order": order,
+                    "extension_id": selection.extension_id,
+                    "operation": selection.operation,
+                    "event": selection.event,
+                    "mode": selection.mode,
+                    "repository_id": selection.repository_id,
+                    "registration": structural_key(
+                        {
+                            "contract": registration.manifest.contract_version,
+                            "operations": tuple(
+                                item.name for item in registration.operations
+                            ),
+                            "callbacks": tuple(
+                                (item.event, item.operation, item.modes)
+                                for item in registration.callbacks
+                            ),
+                        }
+                    ),
+                }
+            )
+        return tuple(planned)
+
+    def _dispatch_reconcile_callback(
+        self,
+        space_id: str,
+        repository_id: str | None,
+        selection: CallbackSelection,
+    ):
+        state = self.snapshot()
+        space = self._space(state, space_id)
+        target_repository = repository_id or next(
+            (item.repository_id for item in space.members if item.generated),
+            None,
+        )
+        if target_repository is None:
+            raise InvalidRequest("reconciliation callback has no target repository")
+        bound = self.bind_extension(
+            selection.extension_id,
+            space_id,
+            ConfigurationTarget.repository(target_repository),
+        )
+        event = ExtensionEvent(
+            event=selection.event,
+            mode=selection.mode,
+            repository_id=(
+                repository_id
+                if selection.event is not CallbackEvent.RECONCILE_AFTER_COHORT
+                else None
+            ),
+            cohort_id=(
+                space_id
+                if selection.event is CallbackEvent.RECONCILE_AFTER_COHORT
+                else None
+            ),
+        )
+        return self.extension_runtime.invoke(
+            self._extension(selection.extension_id),
+            bound,
+            selection.operation,
+            None,
+            event=event,
+        )
+
+    @staticmethod
     def _validate_extensions(
         registrations: tuple[ExtensionRegistration, ...],
     ) -> dict[str, ExtensionRegistration]:
@@ -1782,6 +2125,74 @@ class OpenLease:
                 raise InvalidRequest(
                     f"duplicate extension identity: {manifest.identifier}"
                 )
+            operation_names = [item.name for item in registration.operations]
+            if any(
+                not name or name in {".", ".."} or "/" in name or "\\" in name
+                for name in operation_names
+            ):
+                raise InvalidRequest("invalid extension operation name")
+            if len(operation_names) != len(set(operation_names)):
+                raise InvalidRequest(
+                    f"duplicate extension operation: {manifest.identifier}"
+                )
+            allowed_targets = {
+                "space",
+                "direct",
+                "repository",
+                "authority",
+                "cohort",
+            }
+            for operation in registration.operations:
+                if not callable(operation.handler):
+                    raise InvalidRequest("extension operation handler is not callable")
+                if (
+                    not operation.target_kinds
+                    or len(operation.target_kinds) != len(set(operation.target_kinds))
+                    or not set(operation.target_kinds) <= allowed_targets
+                ):
+                    raise InvalidRequest("invalid extension operation target shapes")
+            if registration.validator is not None and not callable(
+                registration.validator
+            ):
+                raise InvalidRequest("extension validator is not callable")
+            required_codec_members = {
+                "decode",
+                "new_document",
+                "root_mapping",
+                "replace_root_mapping",
+                "encode",
+            }
+            for codec in registration.codecs:
+                if any(
+                    not callable(getattr(codec, member, None))
+                    for member in required_codec_members
+                ):
+                    raise InvalidRequest("custom configuration codec is incomplete")
+            known_operations = set(operation_names)
+            callback_keys = []
+            for callback in registration.callbacks:
+                if not isinstance(callback.event, CallbackEvent) or any(
+                    not isinstance(mode, CallbackMode) for mode in callback.modes
+                ):
+                    raise InvalidRequest("invalid extension callback event or mode")
+                if callback.operation not in known_operations:
+                    raise InvalidRequest(
+                        f"extension callback references missing operation: "
+                        f"{callback.operation}"
+                    )
+                if not callback.modes or len(callback.modes) != len(
+                    set(callback.modes)
+                ):
+                    raise InvalidRequest("invalid extension callback modes")
+                if any(
+                    mode.value == "gate"
+                    and callback.event.value != "reconcile.before_repository"
+                    for mode in callback.modes
+                ):
+                    raise InvalidRequest("post-mutation callback cannot be a gate")
+                callback_keys.append((callback.event, callback.operation))
+            if len(callback_keys) != len(set(callback_keys)):
+                raise InvalidRequest("duplicate extension callback")
             results[manifest.identifier] = registration
         return results
 
@@ -1833,7 +2244,6 @@ class OpenLease:
         extension_id: str,
         space_id: str,
         target: ConfigurationTarget,
-        documents: tuple[ConfigurationDocument, ...],
     ) -> ExtensionContext:
         space = self._space(state, space_id)
         member_records = {item.repository_id: item for item in space.members}
@@ -1925,12 +2335,7 @@ class OpenLease:
                     {
                         "pack": item.pack_id,
                         "order": item.order,
-                        "documents": tuple(
-                            document.observed_generation
-                            for document in documents
-                            if document.scope_kind == "pack"
-                            and document.scope_id == item.pack_id
-                        ),
+                        "configuration_generation": state.configuration_generation,
                     }
                 ),
             )
@@ -1938,6 +2343,7 @@ class OpenLease:
         )
         return ExtensionContext(
             extension_id=extension_id,
+            target_kind=target.kind.value,
             space_id=space_id,
             target=target,
             state_generation=state.generation,
@@ -1946,7 +2352,6 @@ class OpenLease:
             members=tuple(members),
             authorities=authorities,
             relationships=relationships,
-            documents=documents,
             roots=self._resolved_extension_roots(state, extension_id),
         )
 

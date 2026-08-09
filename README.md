@@ -98,34 +98,53 @@ result envelope.
 
 ## Extension configuration
 
-Dependent products can explicitly register a versioned extension and delegate
-their generic configuration plumbing to OpenLease. OpenLease resolves machine,
-ordered reusable-pack, direct-space, repository, and root-to-child OpenSpec
-authority documents. It returns opaque content with source provenance, digests,
-observed generations, effective worktree paths, and separately namespaced
-configuration/data/cache roots; the extension still owns its schema and meaning.
+Dependent products explicitly register version-two extensions and delegate generic
+configuration and confined storage plumbing to OpenLease. Registration is inert:
+configuration never selects a runner, invokes an operation, or authorizes Git.
+The extension still owns its schema, defaults, and product meaning.
+
+Each binding records `yaml`, `toml`, `json`, or an explicitly registered custom
+codec, plus `shared` or `dedicated` layout and read-only/writable authority. Shared
+documents use exact extension identity keys; dots are literal, so TOML writes
+`["zpp.behave"]`. Dedicated documents assign the complete root mapping to one
+extension, allowing an existing root-level `zpp.behave.yaml` to stay unwrapped.
 
 ```python
 from pathlib import Path
 
 from openlease import (
-    ConfigurationTarget,
+    ConfigurationLayout,
     ExtensionManifest,
+    ExtensionOperation,
     ExtensionRegistration,
     OpenLease,
 )
 
+def verify(invocation):
+    runner = invocation.config["runner"]
+    invocation.data["last-runner"] = runner
+    return {"selected": runner}
+
 zpp_root = Path.home() / ".zpp"
 system = OpenLease(
     zpp_root / "openlease",
-    extensions=(ExtensionRegistration(ExtensionManifest("zpp.traits")),),
+    extensions=(
+        ExtensionRegistration(
+            ExtensionManifest("zpp.behave"),
+            operations=(ExtensionOperation("verify", verify),),
+        ),
+    ),
 )
-system.set_extension_roots("zpp.traits", product_root=zpp_root)
-result = system.resolve_extension_context(
-    "zpp.traits",
-    "current-work",
-    ConfigurationTarget.authority("package-a"),
+system.set_extension_roots("zpp.behave", product_root=zpp_root)
+behavior = system.bind_extension_document(
+    "zpp.behave",
+    Path("zpp.behave.yaml"),
+    codec="yaml",
+    layout=ConfigurationLayout.DEDICATED,
+    writable=True,
 )
+behavior.config["runner"] = "go-task"  # Saved atomically; no save() call.
+result = behavior.invoke("verify", {"targets": ["bdd"]})
 ```
 
 This lets rebuilt ZPP retain `.zpp` as its product root without independently
@@ -134,28 +153,45 @@ OpenLease configuration pack can replace a profile; direct space configuration
 then specializes those pack defaults. Configuration scopes are not child spaces
 and never acquire leases.
 
+Managed reads are source-authoritative and nested values are immutable. Writes
+target one exact writable binding, coordinate by canonical document path, reject
+same-key races, rebase unrelated edits, and publish with atomic replacement.
+Writing a lower-precedence source does not change a higher-precedence winner.
+Direct configuration/data/cache assignments are immediate and remain published if
+a handler later fails. `with extension.batch()` is the only way to request a
+bounded grouped managed write; it never claims atomicity over Git, subprocesses,
+network calls, or arbitrary filesystem effects.
+
 The optional CLI exposes the same generic operations:
 
 ```console
 openlease extension roots-set zpp.traits --product-root ~/.zpp
-openlease config bind zpp.traits machine ~/.zpp/traits.md --scope machine
+openlease config bind zpp.traits machine ~/.zpp/traits.yaml --scope machine --codec yaml --layout dedicated --read-only
 openlease pack define zpp.traits backend
 openlease --space current-work pack attach zpp.traits backend --order 1
 openlease --space current-work --json extension context zpp.traits --authority package-a
 ```
 
-Every context request reads the currently bound documents. An edit is visible on
+Every configuration request reads the currently bound documents. An edit is visible on
 the next request even while the space is locked; a missing source fails instead
 of returning stale cached content, without changing lease or graph generations.
 Repository-contained bindings follow the same relative path into a generated
 worktree, while external bindings retain their exact canonical machine path.
 Dependency edges are reported but never import provider configuration implicitly.
 
-Configuration state uses schema version 2. A version-1 index is accepted as an
-empty configuration model, and its exact bytes are preserved once as
-`state.v1.json` before the first upgraded write. Restoring that file for an older
-binary discards state changes made after migration; OpenLease does not claim
-bidirectional version-1/version-2 compatibility.
+Configuration state uses schema version 3 and requires codec, layout, and write
+authority on every binding. Earlier state and the former resolver/injected-verifier
+contracts are rejected with reinitialization guidance. OpenLease performs no
+compatibility read or automatic migration and never rewrites referenced authored
+YAML, TOML, or JSON while rejecting old state.
+
+Reconciliation callbacks are also explicit. A plan selects exact extension,
+operation, event, mode, and repository/cohort targets. Only
+`reconcile.before_repository` may gate before Git mutation; post-repository and
+post-cohort callbacks are observational, and their failures never invent an
+"unverified" lifecycle state. Source/destination refs, strategies, staging,
+commits, merge/rebase, conflict resolution, and finalization remain core
+owner-directed OpenLease/Git work, never extension policy.
 
 ## Safety boundary
 

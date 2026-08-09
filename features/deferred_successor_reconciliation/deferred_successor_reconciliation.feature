@@ -117,8 +117,31 @@ Feature: Defer and reconcile affected branch cohorts
     Given a released successor has pending generated branches
     When the owner supplies an ordered destination and merge-or-rebase strategy for each selected branch
     Then reconcile plans every source-to-destination leg against the current destination commits
-    And reports divergence, dirty worktrees, missing branches, likely textual conflicts, and verification
+    And reports divergence, dirty worktrees, missing branches, likely textual conflicts, intrinsic safety, and exact callback selections
     And does not mutate Git during planning
+
+  Scenario: Reconcile without extension callbacks
+    Given a released successor has pending generated branches
+    When the owner plans reconciliation without selecting callbacks
+    Then no registered or configured extension operation becomes required work
+    And intrinsic OpenLease Git and ownership checks remain active
+
+  Scenario: Stop before Git on an explicitly selected gate
+    Given a released successor and a registered failing pre-repository callback
+    When the owner selects that callback as a gate and applies reconciliation
+    Then OpenLease records the failed callback outcome before Git mutation
+    And the repository remains pending and unintegrated
+
+  Scenario: Preserve integration after an observational callback failure
+    Given a released successor and a registered failing post-repository callback
+    When the owner selects that callback observationally and applies reconciliation
+    Then the repository remains ordinarily reconciled
+    And the callback failure is reported without an unverified lifecycle state
+
+  Scenario: Reject a post-mutation gate
+    Given a released successor and a registered post-repository callback
+    When the owner selects that callback as a gate while planning
+    Then OpenLease rejects the unsupported mode before Git mutation
 
   Scenario: Default the visible plan order from provider to consumer
     Given repo 2 depends on the affected authority hosted by repo 3

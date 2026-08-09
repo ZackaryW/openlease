@@ -110,6 +110,8 @@ def test_plans_configuration_in_scope_specificity_order(tmp_path: Path) -> None:
             scope_id,
             "external",
             str((tmp_path / f"{identifier}.md").resolve()),
+            codec="json",
+            layout="dedicated",
             order=order,
         )
 

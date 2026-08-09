@@ -17,20 +17,13 @@ from openlease.core.state_codec import (
 
 
 def test_rejects_an_unsupported_state_version() -> None:
-    with pytest.raises(StateFormatError, match="unsupported"):
-        decode_state(b'{"schema_version":3,"generation":0}')
+    with pytest.raises(StateFormatError, match="reinitialize"):
+        decode_state(b'{"schema_version":2,"generation":0}')
 
 
-def test_decodes_version_one_as_empty_version_two_configuration() -> None:
-    state = decode_state(b'{"schema_version":1,"generation":4}')
-
-    assert state.schema_version == 2
-    assert state.generation == 4
-    assert state.configuration_generation == 0
-    assert state.extension_roots == ()
-    assert state.configuration_packs == ()
-    assert state.configuration_sources == ()
-    assert state.space_pack_attachments == ()
+def test_rejects_old_state_without_a_compatibility_decoder() -> None:
+    with pytest.raises(StateFormatError, match="reinitialize"):
+        decode_state(b'{"schema_version":1,"generation":4}')
 
 
 def test_round_trips_canonical_registered_state() -> None:
@@ -47,7 +40,7 @@ def test_round_trips_canonical_registered_state() -> None:
     assert b'"authorities"' in encoded
 
 
-def test_round_trips_normalized_version_two_configuration_records() -> None:
+def test_round_trips_current_configuration_binding_records() -> None:
     state = OpenLeaseState(
         configuration_generation=7,
         repositories=(RepositoryRecord("repo-1", "C:/work/repo1"),),
@@ -65,6 +58,9 @@ def test_round_trips_normalized_version_two_configuration_records() -> None:
                 None,
                 "external",
                 "C:/Users/me/.zpp/traits.md",
+                codec="yaml",
+                layout="dedicated",
+                writable=True,
                 order=1,
                 revision=2,
             ),
@@ -76,6 +72,8 @@ def test_round_trips_normalized_version_two_configuration_records() -> None:
                 "repository",
                 ".zpp/traits.md",
                 repository_id="repo-1",
+                codec="yaml",
+                layout="dedicated",
             ),
         ),
         space_pack_attachments=(
@@ -96,6 +94,8 @@ def test_rejects_a_relative_external_configuration_source() -> None:
                 None,
                 "external",
                 "relative/traits.md",
+                codec="yaml",
+                layout="dedicated",
             ),
         )
     )
@@ -105,27 +105,17 @@ def test_rejects_a_relative_external_configuration_source() -> None:
 
 
 def test_rejects_an_authority_with_a_missing_repository() -> None:
-    source = b"""{
-      "schema_version": 1,
-      "generation": 0,
-      "repositories": [],
-      "authorities": [{
-        "identifier": "authority-a",
-        "repository_id": "missing",
-        "relative_path": "openspec",
-        "store_id": null
-      }]
-    }"""
-
     with pytest.raises(StateFormatError, match="missing repository"):
-        decode_state(source)
+        encode_state(
+            OpenLeaseState(
+                authorities=(AuthorityRecord("authority-a", "missing", "openspec"),)
+            )
+        )
 
 
 def test_rejects_unknown_state_fields() -> None:
     with pytest.raises(StateFormatError, match="unknown"):
-        decode_state(
-            b'{"schema_version":1,"generation":0,"repositories":[],"authorities":[],"extra":true}'
-        )
+        decode_state(b'{"schema_version":3,"generation":0,"extra":true}')
 
 
 def test_structural_keys_are_canonical_for_equivalent_values() -> None:

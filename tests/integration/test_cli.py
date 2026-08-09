@@ -193,14 +193,14 @@ def test_cli_configures_and_inspects_namespaced_extension_roots(
     assert roots["configuration"]["provenance"] == "product_root"
 
 
-def test_cli_binds_and_resolves_an_opaque_extension_document(
+def test_cli_binds_and_resolves_a_managed_extension_document(
     tmp_path: Path,
 ) -> None:
     runner = CliRunner()
     state_root = tmp_path / "state"
     repository = _repository(tmp_path / "repo")
-    source = tmp_path / "traits.md"
-    source.write_text("current traits", encoding="utf-8")
+    source = tmp_path / "traits.json"
+    source.write_text('{"zpp": {"traits": "current"}}', encoding="utf-8")
 
     commands = (
         ("register", "repository", "repo", str(repository)),
@@ -214,6 +214,10 @@ def test_cli_binds_and_resolves_an_opaque_extension_document(
             str(source),
             "--scope",
             "machine",
+            "--codec",
+            "json",
+            "--layout",
+            "shared",
         ),
     )
     for command in commands:
@@ -237,16 +241,16 @@ def test_cli_binds_and_resolves_an_opaque_extension_document(
     )
 
     assert resolved.exit_code == 0, resolved.output
-    document = json.loads(resolved.stdout)["data"]["context"]["documents"][0]
-    assert document["identifier"] == "machine"
-    assert document["content"]["encoding"] == "base64"
+    data = json.loads(resolved.stdout)["data"]
+    assert data["configuration"]["values"] == {"traits": "current"}
+    assert data["configuration"]["bindings"][0]["identifier"] == "machine"
 
 
 def test_cli_manages_pack_attachments_and_source_removal(tmp_path: Path) -> None:
     runner = CliRunner()
     state_root = tmp_path / "state"
-    source = tmp_path / "pack.md"
-    source.write_text("pack", encoding="utf-8")
+    source = tmp_path / "pack.json"
+    source.write_text('{"zpp": {"pack": true}}', encoding="utf-8")
     commands = (
         ("space", "create", "work"),
         ("pack", "define", "zpp", "backend"),
@@ -261,6 +265,10 @@ def test_cli_manages_pack_attachments_and_source_removal(tmp_path: Path) -> None
             "pack",
             "--scope-id",
             "backend",
+            "--codec",
+            "json",
+            "--layout",
+            "shared",
         ),
         ("config", "remove", "zpp", "pack-source"),
         ("pack", "detach", "zpp", "backend", "--space", "work"),

@@ -4,7 +4,11 @@ from threading import Event
 
 import pytest
 
-from openlease.core.state_codec import OpenLeaseState, RepositoryRecord
+from openlease.core.state_codec import (
+    OpenLeaseState,
+    RepositoryRecord,
+    StateFormatError,
+)
 from openlease.utils import state_repository
 from openlease.utils.state_repository import StaleStateError, StateRepository
 
@@ -34,18 +38,18 @@ def test_atomically_commits_one_generation_and_rejects_a_stale_writer(
         repository.mutate(0, lambda current: current)
 
 
-def test_preserves_a_version_one_index_before_the_first_version_two_write(
+def test_rejects_an_old_index_without_migration_or_rewrite(
     tmp_path: Path,
 ) -> None:
     repository = StateRepository(tmp_path)
     version_one = b'{"schema_version":1,"generation":4}\n'
     repository.index_path.write_bytes(version_one)
 
-    updated = repository.mutate(4, lambda current: current)
+    with pytest.raises(StateFormatError, match="reinitialize"):
+        repository.mutate(4, lambda current: current)
 
-    assert updated.schema_version == 2
-    assert repository.backup_path.read_bytes() == version_one
-    assert repository.load().generation == 5
+    assert repository.index_path.read_bytes() == version_one
+    assert not (tmp_path / "state.v1.json").exists()
 
 
 def test_preserves_the_previous_index_when_replacement_fails(

@@ -11,6 +11,7 @@ import typer
 
 from openlease import (
     BranchSelection,
+    ConfigurationLayout,
     ConfigurationTarget,
     ExtensionManifest,
     ExtensionRegistration,
@@ -182,8 +183,14 @@ def extension_context(
             if repository is not None
             else ConfigurationTarget.authority(authority or "")
         )
-        return lifecycle.resolve_extension_context(
-            extension, _space(context, space), target
+        bound = lifecycle.bind_extension(extension, _space(context, space), target)
+        return CommandResult(
+            "extension_context",
+            changed=False,
+            data={
+                "context": bound.context,
+                "configuration": bound.config.snapshot_record(),
+            },
         )
 
     _run(context, resolve)
@@ -196,7 +203,10 @@ def configuration_bind(
     identifier: str,
     source: Path,
     scope: Annotated[str, typer.Option("--scope")],
+    codec: Annotated[str, typer.Option("--codec")],
+    layout: Annotated[ConfigurationLayout, typer.Option("--layout")],
     scope_id: Annotated[str | None, typer.Option("--scope-id")] = None,
+    writable: Annotated[bool, typer.Option("--writable/--read-only")] = False,
     order: Annotated[int, typer.Option("--order")] = 0,
 ) -> None:
     context = _context(ctx)
@@ -209,6 +219,9 @@ def configuration_bind(
             source,
             scope,
             scope_id,
+            codec=codec,
+            layout=layout.value,
+            writable=writable,
             order=order,
         ),
     )

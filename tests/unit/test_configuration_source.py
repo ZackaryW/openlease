@@ -24,6 +24,9 @@ def test_rereads_current_bytes_and_changes_the_observed_generation(
         repository_id=None,
         order=0,
         binding_revision=3,
+        codec="json",
+        layout="dedicated",
+        writable=False,
     )
     reader = ConfigurationSourceReader()
 
@@ -44,7 +47,19 @@ def test_retries_when_a_source_is_replaced_during_read(
 ) -> None:
     path = tmp_path / "traits.md"
     path.write_bytes(b"first")
-    source = PlannedSource("machine", "zpp", "machine", None, path, None, 0, 1)
+    source = PlannedSource(
+        "machine",
+        "zpp",
+        "machine",
+        None,
+        path,
+        None,
+        0,
+        1,
+        "json",
+        "dedicated",
+        False,
+    )
     original_read = Path.read_bytes
     replaced = False
 
@@ -69,7 +84,19 @@ def test_does_not_fall_back_after_a_previously_read_source_disappears(
 ) -> None:
     path = tmp_path / "traits.md"
     path.write_bytes(b"current")
-    source = PlannedSource("machine", "zpp", "machine", None, path, None, 0, 1)
+    source = PlannedSource(
+        "machine",
+        "zpp",
+        "machine",
+        None,
+        path,
+        None,
+        0,
+        1,
+        "json",
+        "dedicated",
+        False,
+    )
     reader = ConfigurationSourceReader()
     reader.read(source)
     path.unlink()
