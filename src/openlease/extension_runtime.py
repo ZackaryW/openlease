@@ -25,7 +25,14 @@ from openlease.configuration_codec import (
     replace_namespace,
     validate_managed_value,
 )
-from openlease.errors import InvalidRequest
+from openlease.errors import (
+    ConfigurationConflict,
+    ConfigurationDecodeFailed,
+    ConfigurationPathChanged,
+    ConfigurationReadOnly,
+    ConfigurationValidationFailed,
+    InvalidRequest,
+)
 from openlease.extension import (
     BindingProvenance,
     BoundExtension,
@@ -40,11 +47,6 @@ from openlease.extension import (
     WriteDispositionKind,
 )
 from openlease.result import json_value
-
-
-class ConfigurationConflict(InvalidRequest):
-    """A managed assignment was based on a stale value for the same local key."""
-
 
 _MISSING = object()
 
@@ -84,10 +86,16 @@ def resolve_effective_configuration(
                 codec, document, binding.extension_id, binding.layout
             )
         except CodecError as error:
-            raise InvalidRequest(
+            raise ConfigurationDecodeFailed(
                 f"configuration {binding.codec} decode/layout failed: "
                 f"{binding.identifier}",
-                details={"phase": "decode", "error": str(error)},
+                details={
+                    "phase": FailurePhase.DECODE.value,
+                    "binding": binding.identifier,
+                    "codec": binding.codec,
+                    "path": str(path),
+                    "error": str(error),
+                },
             ) from error
         observed = sha256(f"{binding.revision}:{digest}".encode()).hexdigest()
         selected_immutable = MappingProxyType(
@@ -122,7 +130,7 @@ def resolve_effective_configuration(
     )
 
 
-class ManagedConfiguration(MutableMapping[str, ManagedValue]):
+class _ManagedConfiguration(MutableMapping[str, ManagedValue]):
     def __init__(
         self,
         *,
@@ -151,7 +159,7 @@ class ManagedConfiguration(MutableMapping[str, ManagedValue]):
             try:
                 self._validator(snapshot.values)
             except Exception as error:
-                raise InvalidRequest(
+                raise ConfigurationValidationFailed(
                     "extension configuration validation failed",
                     details={
                         "phase": FailurePhase.VALIDATION.value,
@@ -194,23 +202,40 @@ class ManagedConfiguration(MutableMapping[str, ManagedValue]):
         return key in self.snapshot()
 
     def __setitem__(self, key: str, value: ManagedValue) -> None:
-        self._mutate(key, value, delete=False)
+        self.set(key, value)
 
     def __delitem__(self, key: str) -> None:
-        if key not in self.snapshot():
-            raise KeyError(key)
-        self._mutate(key, _MISSING, delete=True)
+        self.delete(key)
 
-    def _mutate(self, key: str, value: object, *, delete: bool) -> None:
+    def set(self, key: str, value: ManagedValue) -> WriteDisposition:
+        return self._mutate(key, value, delete=False)
+
+    def delete(self, key: str) -> WriteDisposition:
+        snapshot = self._resolver()
+        if key not in snapshot.values:
+            raise KeyError(key)
+        return self._mutate(key, _MISSING, delete=True)
+
+    def _mutate(self, key: str, value: object, *, delete: bool) -> WriteDisposition:
         if self._writable is None or not self._writable.writable:
-            raise InvalidRequest("extension configuration is read-only")
+            raise ConfigurationReadOnly(
+                "extension configuration is read-only",
+                details={"phase": FailurePhase.MANAGED_WRITE.value, "key": key},
+            )
         if not isinstance(key, str) or not key:
             raise InvalidRequest("configuration key must be a non-empty string")
         if not delete:
             try:
                 validate_managed_value(value)
             except CodecError as error:
-                raise InvalidRequest(str(error)) from error
+                raise ConfigurationValidationFailed(
+                    str(error),
+                    details={
+                        "phase": FailurePhase.VALIDATION.value,
+                        "key": key,
+                        "error": str(error),
+                    },
+                ) from error
         if self._baseline_selected is None:
             self.snapshot_record()
         baseline = (
@@ -229,6 +254,7 @@ class ManagedConfiguration(MutableMapping[str, ManagedValue]):
         self.last_write = disposition
         self._writes.append(disposition)
         self.snapshot_record()
+        return disposition
 
     def writes_since(self, offset: int) -> tuple[WriteDisposition, ...]:
         return tuple(self._writes[offset:])
@@ -259,11 +285,24 @@ class ConfigurationPublisher:
         with FileLock(str(lock_path)):
             canonical, content = _stable_read(binding.path, attempts=3)
             prior_digest = sha256(content).hexdigest()
-            codec = self.codecs.require(binding.codec)
-            document = codec.decode(content)
-            selected = project_namespace(
-                codec, document, binding.extension_id, binding.layout
-            )
+            try:
+                codec = self.codecs.require(binding.codec)
+                document = codec.decode(content)
+                selected = project_namespace(
+                    codec, document, binding.extension_id, binding.layout
+                )
+            except CodecError as error:
+                raise ConfigurationDecodeFailed(
+                    f"configuration {binding.codec} decode/layout failed: "
+                    f"{binding.identifier}",
+                    details={
+                        "phase": FailurePhase.DECODE.value,
+                        "binding": binding.identifier,
+                        "codec": binding.codec,
+                        "path": str(canonical),
+                        "error": str(error),
+                    },
+                ) from error
             current = plain_managed_value(selected.get(key, _MISSING))
             if not _same_value(current, baseline):
                 raise ConfigurationConflict(
@@ -285,17 +324,34 @@ class ConfigurationPublisher:
                 try:
                     validator(binding, changed)
                 except Exception as error:
-                    raise InvalidRequest(
+                    raise ConfigurationValidationFailed(
                         "extension configuration validation failed",
                         details={
                             "phase": FailurePhase.VALIDATION.value,
+                            "binding": binding.identifier,
+                            "path": str(canonical),
+                            "key": key,
                             "error": str(error),
                         },
                     ) from error
-            replace_namespace(
-                codec, document, binding.extension_id, binding.layout, changed
-            )
-            rendered = codec.encode(document)
+            try:
+                replace_namespace(
+                    codec, document, binding.extension_id, binding.layout, changed
+                )
+                rendered = codec.encode(document)
+            except CodecError as error:
+                raise ConfigurationDecodeFailed(
+                    f"configuration {binding.codec} publication failed: "
+                    f"{binding.identifier}",
+                    details={
+                        "phase": FailurePhase.DECODE.value,
+                        "binding": binding.identifier,
+                        "codec": binding.codec,
+                        "path": str(canonical),
+                        "key": key,
+                        "error": str(error),
+                    },
+                ) from error
             resulting_digest = sha256(rendered).hexdigest()
             _require_bound_file(binding.path)
             _atomic_replace(binding.path, rendered)
@@ -316,21 +372,56 @@ class ConfigurationPublisher:
         *,
         validator: Callable[[Mapping[str, ManagedValue]], None] | None,
     ) -> None:
-        validate_managed_value(initial)
+        try:
+            validate_managed_value(initial)
+        except CodecError as error:
+            raise ConfigurationValidationFailed(
+                str(error),
+                details={
+                    "phase": FailurePhase.VALIDATION.value,
+                    "binding": binding.identifier,
+                    "path": str(binding.path),
+                    "error": str(error),
+                },
+            ) from error
         if validator is not None:
-            validator(initial)
+            try:
+                validator(initial)
+            except Exception as error:
+                raise ConfigurationValidationFailed(
+                    "extension configuration validation failed",
+                    details={
+                        "phase": FailurePhase.VALIDATION.value,
+                        "binding": binding.identifier,
+                        "path": str(binding.path),
+                        "error": str(error),
+                    },
+                ) from error
         path = binding.path.absolute()
         if path.exists():
             raise InvalidRequest(f"configuration document already exists: {path}")
         if not path.parent.is_dir():
             raise InvalidRequest(f"configuration parent does not exist: {path.parent}")
-        codec = self.codecs.require(binding.codec)
-        root = (
-            initial
-            if binding.layout is ConfigurationLayout.DEDICATED
-            else {binding.extension_id: initial}
-        )
-        rendered = codec.encode(codec.new_document(root))
+        try:
+            codec = self.codecs.require(binding.codec)
+            root = (
+                initial
+                if binding.layout is ConfigurationLayout.DEDICATED
+                else {binding.extension_id: initial}
+            )
+            rendered = codec.encode(codec.new_document(root))
+        except CodecError as error:
+            raise ConfigurationDecodeFailed(
+                f"configuration {binding.codec} initialization failed: "
+                f"{binding.identifier}",
+                details={
+                    "phase": FailurePhase.DECODE.value,
+                    "binding": binding.identifier,
+                    "codec": binding.codec,
+                    "path": str(binding.path),
+                    "error": str(error),
+                },
+            ) from error
         lock_path = self._lock_path(path)
         lock_path.parent.mkdir(parents=True, exist_ok=True)
         with FileLock(str(lock_path)):
@@ -487,7 +578,14 @@ class ExtensionRuntime:
                 )
             writable = matching[0]
             if not writable.writable:
-                raise InvalidRequest("selected configuration source is read-only")
+                raise ConfigurationReadOnly(
+                    "selected configuration source is read-only",
+                    details={
+                        "phase": FailurePhase.BINDING.value,
+                        "binding": writable.identifier,
+                        "path": str(writable.path),
+                    },
+                )
 
         def resolve():
             snapshot = resolve_effective_configuration(
@@ -500,7 +598,7 @@ class ExtensionRuntime:
                 try:
                     registration.validator(snapshot.values)
                 except Exception as error:
-                    raise InvalidRequest(
+                    raise ConfigurationValidationFailed(
                         "extension configuration validation failed",
                         details={
                             "phase": FailurePhase.VALIDATION.value,
@@ -531,7 +629,7 @@ class ExtensionRuntime:
                 effective.update(selected)
             registration.validator(MappingProxyType(effective))
 
-        config = ManagedConfiguration(
+        config = _ManagedConfiguration(
             resolver=resolve,
             writable=writable,
             publisher=self.publisher,
@@ -768,8 +866,9 @@ def _stable_read(path: Path, *, attempts: int) -> tuple[Path, bytes]:
             content = canonical.read_bytes()
             after = canonical.stat()
         except OSError as error:
-            raise InvalidRequest(
-                f"configuration source is unavailable: {canonical}"
+            raise ConfigurationPathChanged(
+                f"configuration source is unavailable: {canonical}",
+                details={"phase": FailurePhase.READ.value, "path": str(canonical)},
             ) from error
 
         def identity(stat):
@@ -778,7 +877,10 @@ def _stable_read(path: Path, *, attempts: int) -> tuple[Path, bytes]:
         if identity(before) == identity(after):
             _require_bound_file(canonical)
             return canonical, content
-    raise InvalidRequest(f"configuration source changed repeatedly: {canonical}")
+    raise ConfigurationPathChanged(
+        f"configuration source changed repeatedly: {canonical}",
+        details={"phase": FailurePhase.READ.value, "path": str(canonical)},
+    )
 
 
 def _require_bound_file(path: Path) -> Path:
@@ -786,15 +888,20 @@ def _require_bound_file(path: Path) -> Path:
     try:
         resolved = expected.resolve(strict=True)
     except (OSError, RuntimeError) as error:
-        raise InvalidRequest(
-            f"configuration source is unavailable: {expected}"
+        raise ConfigurationPathChanged(
+            f"configuration source is unavailable: {expected}",
+            details={"phase": FailurePhase.READ.value, "path": str(expected)},
         ) from error
     if resolved != expected or expected.is_symlink():
-        raise InvalidRequest(
-            f"configuration source path changed after binding: {expected}"
+        raise ConfigurationPathChanged(
+            f"configuration source path changed after binding: {expected}",
+            details={"phase": FailurePhase.READ.value, "path": str(expected)},
         )
     if not expected.is_file():
-        raise InvalidRequest(f"configuration source is not a file: {expected}")
+        raise ConfigurationPathChanged(
+            f"configuration source is not a file: {expected}",
+            details={"phase": FailurePhase.READ.value, "path": str(expected)},
+        )
     return expected
 
 

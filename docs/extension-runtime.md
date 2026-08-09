@@ -1,7 +1,8 @@
 # Bounded extension runtime
 
-OpenLease contract version 2 is a clean replacement for the former resolver-only
-extension seam. Hosts must explicitly register extensions, operations, callbacks,
+OpenLease contract version 3 is a clean replacement for the version-two public
+configuration surface and the earlier resolver-only extension seam. Hosts must
+explicitly register extensions, operations, callbacks,
 validators, and additional codecs. Registration and configuration presence are
 inert; only a host invocation or an accepted lifecycle callback selection executes
 extension code.
@@ -40,6 +41,24 @@ rejects a same-key baseline conflict, rebases unrelated changes, mutates the ret
 round-trip tree, writes a flushed temporary sibling, and publishes with
 `os.replace`. A lower-source write can remain shadowed by a later source; provenance
 reports both facts.
+
+`ManagedConfiguration` is the public configuration protocol returned on bound
+extensions and invocations. It adds `snapshot_record()`, `set()`, and `delete()` to
+the general managed mapping contract. Explicit mutations return the completed
+`WriteDisposition`; mapping assignment and deletion keep their automatic-save
+behavior. Data and cache remain general managed mappings.
+
+`ExtensionDocumentBinding` is a frozen reusable description for direct open and
+initialization calls. It always carries an explicit extension identity, path,
+codec, layout, write authority, and optional repository context. Object and scalar
+call forms normalize through the same validation; codec and layout are never
+inferred.
+
+Public configuration entry points distinguish read-only, validation, path-change,
+decode, and same-key conflict failures with exported error types and stable codes.
+Standalone codec calls continue to raise `CodecError`. Use
+`to_plain_managed_value()` to copy a supported immutable managed snapshot into
+ordinary dictionaries and lists for downstream schema validation.
 
 Direct bindings apply the same codec, validation, conflict, and managed-storage
 contract to one invocation-scoped document. They create no space, topology,
@@ -85,7 +104,8 @@ and Nx, Go Task, or argv values remain opaque extension data. OpenLease resolves
 paths, codecs, overlays, storage, and concurrency; it does not modify ZPP profiles,
 traits, process policy, environment selection, or runner behavior.
 
-There is no compatibility decoder or automatic migration. State schemas before
-version 3, resolver-only registrations, and the injected reconciliation verifier
+There is no compatibility decoder or automatic migration. Extension contracts
+before version 3, state schemas before version 3, resolver-only registrations, and
+the injected reconciliation verifier
 are rejected with reinitialization guidance. Authored YAML/TOML/JSON documents are
 not read or rewritten while old state is rejected.

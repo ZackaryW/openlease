@@ -8,10 +8,17 @@ from openlease.configuration_codec import (
     JsonCodec,
     TomlCodec,
     YamlCodec,
+    to_plain_managed_value,
 )
 from openlease.core.configuration import ConfigurationTarget
 from openlease.errors import (
     AuthorityConflict,
+    ConfigurationConflict,
+    ConfigurationDecodeFailed,
+    ConfigurationError,
+    ConfigurationPathChanged,
+    ConfigurationReadOnly,
+    ConfigurationValidationFailed,
     InvalidRequest,
     OpenLeaseError,
     OwnershipConflict,
@@ -29,6 +36,7 @@ from openlease.extension import (
     ExtensionAuthority,
     ExtensionCallback,
     ExtensionContext,
+    ExtensionDocumentBinding,
     ExtensionEvent,
     ExtensionInvocation,
     ExtensionInvocationResult,
@@ -41,15 +49,11 @@ from openlease.extension import (
     ExtensionRelationship,
     FailurePhase,
     HandlerStatus,
+    ManagedConfiguration,
     WriteDisposition,
     WriteDispositionKind,
 )
-from openlease.extension_runtime import (
-    ConfigurationConflict,
-    ManagedBatch,
-    ManagedConfiguration,
-    ManagedRecordMapping,
-)
+from openlease.extension_runtime import ManagedBatch, ManagedRecordMapping
 from openlease.lifecycle import BranchSelection, OpenLease, ReconcileSelection
 from openlease.result import CommandResult
 
@@ -67,13 +71,19 @@ __all__ = [
     "CommandResult",
     "ConfigurationCodec",
     "ConfigurationConflict",
+    "ConfigurationDecodeFailed",
+    "ConfigurationError",
     "ConfigurationLayout",
+    "ConfigurationPathChanged",
+    "ConfigurationReadOnly",
     "ConfigurationTarget",
+    "ConfigurationValidationFailed",
     "DirectDocumentTarget",
     "EffectiveConfigurationSnapshot",
     "ExtensionAuthority",
     "ExtensionCallback",
     "ExtensionContext",
+    "ExtensionDocumentBinding",
     "ExtensionEvent",
     "ExtensionInvocation",
     "ExtensionInvocationResult",
@@ -100,4 +110,5 @@ __all__ = [
     "WriteDisposition",
     "WriteDispositionKind",
     "YamlCodec",
+    "to_plain_managed_value",
 ]

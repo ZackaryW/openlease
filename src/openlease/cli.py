@@ -117,6 +117,9 @@ def _exit_for_error(error: OpenLeaseError) -> None:
         "message": str(error),
         "details": json_value(error.details),
     }
+    code = getattr(error, "code", None)
+    if code is not None:
+        envelope["code"] = code
     typer.echo(json.dumps(envelope, sort_keys=True), err=True)
     raise typer.Exit(error.exit_status) from None
 

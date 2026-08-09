@@ -9,8 +9,14 @@ from threading import Barrier
 import pytest
 
 from openlease import (
+    ConfigurationConflict,
+    ConfigurationDecodeFailed,
     ConfigurationLayout,
+    ConfigurationPathChanged,
+    ConfigurationReadOnly,
     ConfigurationTarget,
+    ConfigurationValidationFailed,
+    ExtensionDocumentBinding,
     ExtensionManifest,
     ExtensionOperation,
     ExtensionRegistration,
@@ -20,7 +26,7 @@ from openlease import (
     WriteDispositionKind,
     extension_runtime,
 )
-from openlease.extension_runtime import ConfigurationConflict
+from openlease.configuration_codec import CodecError, JsonCodec
 
 
 def registration(identifier="zpp.behave", operation=None, validator=None):
@@ -75,6 +81,61 @@ def test_direct_dedicated_document_is_live_defensive_and_automatically_saved(
     assert bound.config.last_write.kind is WriteDispositionKind.COMMITTED
 
 
+def test_public_snapshot_record_contains_complete_binding_provenance(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "config.json"
+    source.write_text('{"runner": "argv"}', encoding="utf-8")
+    system = OpenLease(tmp_path / "state", extensions=(registration("extension"),))
+
+    bound = system.bind_extension_document(
+        "extension", source, codec="json", layout="dedicated", writable=True
+    )
+    snapshot = bound.config.snapshot_record()
+
+    assert snapshot.values == {"runner": "argv"}
+    assert snapshot.winners == {"runner": snapshot.bindings[0].identifier}
+    assert snapshot.state_generation is None
+    assert snapshot.configuration_generation is None
+    assert snapshot.bindings[0].canonical_path == source.resolve()
+    assert snapshot.bindings[0].codec == "json"
+    assert snapshot.bindings[0].layout is ConfigurationLayout.DEDICATED
+    assert snapshot.bindings[0].writable is True
+    assert snapshot.bindings[0].content_digest
+    assert snapshot.bindings[0].observed_generation
+    assert snapshot.bindings[0].selected == {"runner": "argv"}
+
+
+def test_explicit_configuration_mutations_return_completed_dispositions(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "config.json"
+    source.write_text('{"runner": "argv", "remove": true}', encoding="utf-8")
+    system = OpenLease(tmp_path / "state", extensions=(registration("extension"),))
+    bound = system.bind_extension_document(
+        "extension", source, codec="json", layout="dedicated", writable=True
+    )
+
+    written = bound.config.set("runner", "go-task")
+    deleted = bound.config.delete("remove")
+    bound.config["automatic"] = True
+
+    assert written.kind is WriteDispositionKind.COMMITTED
+    assert written.store == "configuration"
+    assert written.key == "runner"
+    assert written.path == source.resolve()
+    assert written.binding_id
+    assert written.prior_digest
+    assert written.resulting_digest
+    assert deleted.kind is WriteDispositionKind.COMMITTED
+    assert deleted.key == "remove"
+    assert bound.config.last_write.key == "automatic"
+    assert json.loads(source.read_text(encoding="utf-8")) == {
+        "runner": "go-task",
+        "automatic": True,
+    }
+
+
 def test_shared_document_preserves_other_extension_and_detects_same_key_conflict(
     tmp_path: Path,
 ) -> None:
@@ -97,9 +158,11 @@ def test_shared_document_preserves_other_extension_and_detects_same_key_conflict
     assert second.config["key"] == "old"
 
     first.config["key"] = "first"
-    with pytest.raises(ConfigurationConflict):
+    with pytest.raises(ConfigurationConflict) as captured:
         second.config["key"] = "second"
 
+    assert captured.value.code == "configuration_conflict"
+    assert captured.value.details["key"] == "key"
     rendered = source.read_text(encoding="utf-8")
     assert "# shared" in rendered
     assert "first" in rendered
@@ -141,9 +204,13 @@ def test_writable_binding_rejects_a_replaced_symlink_without_touching_target(
     except OSError as error:
         pytest.skip(f"file symbolic links are unavailable: {error}")
 
-    with pytest.raises(InvalidRequest, match="configuration source path changed"):
+    with pytest.raises(
+        ConfigurationPathChanged, match="configuration source path changed"
+    ) as captured:
         bound.config["key"] = "escaped"
 
+    assert captured.value.code == "configuration_path_changed"
+    assert captured.value.details["path"] == str(source.absolute())
     assert source.is_symlink()
     assert json.loads(external.read_text(encoding="utf-8")) == {"key": "bound"}
 
@@ -185,11 +252,48 @@ def test_read_only_direct_binding_rejects_mutation_before_io(tmp_path: Path) -> 
     )
     before = source.read_bytes()
 
-    with pytest.raises(InvalidRequest, match="read-only"):
-        bound.config["key"] = 2
+    with pytest.raises(ConfigurationReadOnly, match="read-only") as captured:
+        bound.config.set("key", 2)
 
+    assert captured.value.code == "configuration_read_only"
     assert source.read_bytes() == before
     assert not (tmp_path / "state" / "locks").exists()
+
+
+def test_public_configuration_errors_are_stable_invalid_requests() -> None:
+    categories = {
+        ConfigurationReadOnly: "configuration_read_only",
+        ConfigurationValidationFailed: "configuration_validation_failed",
+        ConfigurationPathChanged: "configuration_path_changed",
+        ConfigurationDecodeFailed: "configuration_decode_failed",
+        ConfigurationConflict: "configuration_conflict",
+    }
+
+    for category, code in categories.items():
+        error = category("message", details={"phase": "test"})
+        assert isinstance(error, InvalidRequest)
+        assert error.code == code
+        assert error.details == {"phase": "test"}
+
+
+def test_direct_configuration_decode_is_structured_but_codec_use_is_not(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "config.json"
+    source.write_text("not-json", encoding="utf-8")
+    system = OpenLease(tmp_path / "state", extensions=(registration("extension"),))
+
+    with pytest.raises(ConfigurationDecodeFailed) as captured:
+        system.bind_extension_document(
+            "extension", source, codec="json", layout="dedicated"
+        )
+
+    assert captured.value.code == "configuration_decode_failed"
+    assert captured.value.details["codec"] == "json"
+    assert captured.value.details["path"] == str(source.resolve())
+    assert captured.value.__cause__ is not None
+    with pytest.raises(CodecError):
+        JsonCodec().decode(b"not-json")
 
 
 def test_initialize_direct_document_requires_absence_and_writable_authority(
@@ -215,6 +319,106 @@ def test_initialize_direct_document_requires_absence_and_writable_authority(
             layout="dedicated",
             initial={},
         )
+
+
+def test_binding_object_opens_and_initializes_with_declared_provenance(
+    tmp_path: Path,
+) -> None:
+    existing = tmp_path / "existing.yaml"
+    existing.write_text("key: existing\n", encoding="utf-8")
+    created = tmp_path / "created.yaml"
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    system = OpenLease(tmp_path / "state", extensions=(registration("extension"),))
+    opened_spec = ExtensionDocumentBinding(
+        extension_id="extension",
+        path=existing,
+        codec="yaml",
+        layout=ConfigurationLayout.DEDICATED,
+        writable=False,
+        repository_path=repository,
+    )
+    created_spec = ExtensionDocumentBinding(
+        extension_id="extension",
+        path=created,
+        codec="yaml",
+        layout=ConfigurationLayout.DEDICATED,
+        writable=True,
+        repository_path=repository,
+    )
+
+    opened = system.bind_extension_document(opened_spec)
+    initialized = system.initialize_extension_document(
+        created_spec,
+        initial={"key": "created"},
+        boundary=tmp_path,
+    )
+
+    assert opened.config["key"] == "existing"
+    assert initialized.config["key"] == "created"
+    assert opened.context.target.repository_path == repository.resolve()
+    assert initialized.context.target.repository_path == repository.resolve()
+    assert opened.config.snapshot_record().bindings[0].codec == "yaml"
+    assert initialized.config.snapshot_record().bindings[0].layout is (
+        ConfigurationLayout.DEDICATED
+    )
+
+
+def test_binding_object_and_scalar_forms_are_equivalent(tmp_path: Path) -> None:
+    source = tmp_path / "config.json"
+    source.write_text('{"key": "value"}', encoding="utf-8")
+    system = OpenLease(tmp_path / "state", extensions=(registration("extension"),))
+    binding = ExtensionDocumentBinding(
+        extension_id="extension",
+        path=source,
+        codec="json",
+        layout=ConfigurationLayout.DEDICATED,
+        writable=True,
+    )
+
+    object_bound = system.bind_extension_document(binding)
+    scalar_bound = system.bind_extension_document(
+        "extension",
+        source,
+        codec="json",
+        layout=ConfigurationLayout.DEDICATED,
+        writable=True,
+    )
+
+    assert object_bound.config.snapshot() == scalar_bound.config.snapshot()
+    assert object_bound.config.snapshot_record().bindings == (
+        scalar_bound.config.snapshot_record().bindings
+    )
+
+
+def test_binding_object_rejects_mixed_fields_and_read_only_initialization(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "missing.json"
+    binding = ExtensionDocumentBinding(
+        extension_id="extension",
+        path=source,
+        codec="json",
+        layout=ConfigurationLayout.DEDICATED,
+        writable=False,
+    )
+    system = OpenLease(tmp_path / "state", extensions=(registration("extension"),))
+
+    with pytest.raises(InvalidRequest, match="cannot be combined"):
+        system.bind_extension_document(
+            binding,
+            tmp_path / "other.json",
+            codec="json",
+            layout="dedicated",
+        )
+    with pytest.raises(ConfigurationReadOnly):
+        system.initialize_extension_document(
+            binding,
+            initial={},
+            boundary=tmp_path,
+        )
+
+    assert not source.exists()
 
 
 def test_named_operation_gets_narrow_mappings_and_persists_truthful_outcome(
@@ -283,10 +487,13 @@ def test_configuration_validator_runs_before_handler(tmp_path: Path) -> None:
         extensions=(registration(operation=run, validator=validate),),
     )
 
-    with pytest.raises(InvalidRequest, match="validation"):
+    with pytest.raises(ConfigurationValidationFailed, match="validation") as captured:
         system.bind_extension_document(
             "zpp.behave", source, codec="json", layout="dedicated"
         )
+    assert captured.value.code == "configuration_validation_failed"
+    assert captured.value.details["phase"] == "validation"
+    assert captured.value.__cause__ is not None
     assert called is False
 
 

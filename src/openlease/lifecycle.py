@@ -4,7 +4,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from hashlib import sha256
 from pathlib import Path
-from typing import Literal
+from typing import Literal, overload
 
 from openlease.configuration_codec import (
     CodecError,
@@ -64,18 +64,23 @@ from openlease.core.state_codec import (
 )
 from openlease.errors import (
     AuthorityConflict,
+    ConfigurationDecodeFailed,
+    ConfigurationReadOnly,
+    ConfigurationValidationFailed,
     InvalidRequest,
     OwnershipConflict,
     PreparationFailed,
 )
 from openlease.extension import (
     EXTENSION_CONTRACT_VERSION,
+    BoundExtension,
     CallbackEvent,
     CallbackMode,
     CallbackSelection,
     DirectDocumentTarget,
     ExtensionAuthority,
     ExtensionContext,
+    ExtensionDocumentBinding,
     ExtensionEvent,
     ExtensionMember,
     ExtensionPack,
@@ -149,6 +154,13 @@ class OpenLease:
     def registered_extensions(self) -> tuple[str, ...]:
         return tuple(self._extensions)
 
+    @overload
+    def bind_extension_document(
+        self,
+        binding: ExtensionDocumentBinding,
+    ) -> BoundExtension: ...
+
+    @overload
     def bind_extension_document(
         self,
         extension_id: str,
@@ -158,13 +170,31 @@ class OpenLease:
         layout: ConfigurationLayout | str,
         writable: bool = False,
         repository_path: Path | None = None,
-    ):
-        registration = self._extension(extension_id)
+    ) -> BoundExtension: ...
+
+    def bind_extension_document(
+        self,
+        extension_id: str | ExtensionDocumentBinding,
+        path: Path | None = None,
+        *,
+        codec: str | None = None,
+        layout: ConfigurationLayout | str | None = None,
+        writable: bool | None = None,
+        repository_path: Path | None = None,
+    ) -> BoundExtension:
+        specification = self._normalize_direct_document_binding(
+            extension_id,
+            path,
+            codec=codec,
+            layout=layout,
+            writable=writable,
+            repository_path=repository_path,
+            initializing=False,
+        )
+        registration = self._extension(specification.extension_id)
         try:
-            selected_layout = ConfigurationLayout(layout)
-            self.codecs.require(codec)
-            canonical = path.resolve(strict=True)
-        except (CodecError, OSError, ValueError) as error:
+            canonical = specification.path.resolve(strict=True)
+        except (OSError, RuntimeError) as error:
             raise InvalidRequest(
                 f"invalid direct configuration binding: {error}"
             ) from error
@@ -172,31 +202,46 @@ class OpenLease:
             raise InvalidRequest(f"configuration source is not a file: {canonical}")
         state = self.snapshot()
         context = ExtensionContext(
-            extension_id=extension_id,
+            extension_id=specification.extension_id,
             target_kind="direct",
             target=DirectDocumentTarget(
                 canonical,
-                repository_path.resolve() if repository_path is not None else None,
+                (
+                    specification.repository_path.resolve()
+                    if specification.repository_path is not None
+                    else None
+                ),
             ),
             state_generation=None,
             configuration_generation=None,
-            roots=self._resolved_extension_roots(state, extension_id),
+            roots=self._resolved_extension_roots(state, specification.extension_id),
         )
         binding = RuntimeBinding(
             identifier=f"direct:{sha256(str(canonical).encode()).hexdigest()[:16]}",
-            extension_id=extension_id,
+            extension_id=specification.extension_id,
             path=canonical,
-            codec=codec,
-            layout=selected_layout,
-            writable=writable,
+            codec=specification.codec,
+            layout=specification.layout,
+            writable=specification.writable,
         )
         return self.extension_runtime.bind(
             registration,
             context,
             (binding,),
-            writable_source=binding.identifier if writable else None,
+            writable_source=binding.identifier if binding.writable else None,
         )
 
+    @overload
+    def initialize_extension_document(
+        self,
+        binding: ExtensionDocumentBinding,
+        *,
+        initial: Mapping[str, ManagedValue],
+        boundary: Path | None = None,
+        create_parents: bool = False,
+    ) -> BoundExtension: ...
+
+    @overload
     def initialize_extension_document(
         self,
         extension_id: str,
@@ -208,16 +253,31 @@ class OpenLease:
         repository_path: Path | None = None,
         boundary: Path | None = None,
         create_parents: bool = False,
-    ):
-        registration = self._extension(extension_id)
-        try:
-            selected_layout = ConfigurationLayout(layout)
-            self.codecs.require(codec)
-        except (CodecError, ValueError) as error:
-            raise InvalidRequest(
-                f"invalid direct configuration binding: {error}"
-            ) from error
-        absolute = path.absolute()
+    ) -> BoundExtension: ...
+
+    def initialize_extension_document(
+        self,
+        extension_id: str | ExtensionDocumentBinding,
+        path: Path | None = None,
+        *,
+        codec: str | None = None,
+        layout: ConfigurationLayout | str | None = None,
+        initial: Mapping[str, ManagedValue],
+        repository_path: Path | None = None,
+        boundary: Path | None = None,
+        create_parents: bool = False,
+    ) -> BoundExtension:
+        specification = self._normalize_direct_document_binding(
+            extension_id,
+            path,
+            codec=codec,
+            layout=layout,
+            writable=None,
+            repository_path=repository_path,
+            initializing=True,
+        )
+        registration = self._extension(specification.extension_id)
+        absolute = specification.path.absolute()
         permitted = (boundary or absolute.parent).resolve()
         if permitted.parent == permitted:
             raise InvalidRequest("configuration initialization boundary is too broad")
@@ -241,10 +301,10 @@ class OpenLease:
         absolute = resolved_parent / absolute.name
         binding = RuntimeBinding(
             identifier=f"direct:{sha256(str(absolute).encode()).hexdigest()[:16]}",
-            extension_id=extension_id,
+            extension_id=specification.extension_id,
             path=absolute,
-            codec=codec,
-            layout=selected_layout,
+            codec=specification.codec,
+            layout=specification.layout,
             writable=True,
         )
         try:
@@ -256,12 +316,90 @@ class OpenLease:
                 f"configuration initialization failed: {error}"
             ) from error
         return self.bind_extension_document(
-            extension_id,
-            absolute,
-            codec=codec,
+            replace(specification, path=absolute),
+        )
+
+    def _normalize_direct_document_binding(
+        self,
+        extension_id: str | ExtensionDocumentBinding,
+        path: Path | None,
+        *,
+        codec: str | None,
+        layout: ConfigurationLayout | str | None,
+        writable: bool | None,
+        repository_path: Path | None,
+        initializing: bool,
+    ) -> ExtensionDocumentBinding:
+        if isinstance(extension_id, ExtensionDocumentBinding):
+            if any(
+                value is not None
+                for value in (path, codec, layout, writable, repository_path)
+            ):
+                raise InvalidRequest(
+                    "extension document binding cannot be combined with scalar "
+                    "binding fields"
+                )
+            specification = extension_id
+        else:
+            if path is None or codec is None or layout is None:
+                raise InvalidRequest(
+                    "direct configuration binding requires path, codec, and layout"
+                )
+            specification = ExtensionDocumentBinding(
+                extension_id=extension_id,
+                path=path,
+                codec=codec,
+                layout=layout,  # type: ignore[arg-type]
+                writable=True if initializing else bool(writable),
+                repository_path=repository_path,
+            )
+        if (
+            not isinstance(specification.extension_id, str)
+            or not specification.extension_id
+        ):
+            raise InvalidRequest("invalid extension identifier")
+        if not isinstance(specification.codec, str) or not specification.codec:
+            raise ConfigurationDecodeFailed(
+                "direct configuration binding requires an explicit codec",
+                details={"phase": "binding", "codec": specification.codec},
+            )
+        try:
+            selected_layout = ConfigurationLayout(specification.layout)
+        except ValueError as error:
+            raise InvalidRequest(
+                "configuration layout must be shared or dedicated"
+            ) from error
+        try:
+            self.codecs.require(specification.codec)
+        except CodecError as error:
+            raise ConfigurationDecodeFailed(
+                f"configuration codec is not registered: {specification.codec}",
+                details={
+                    "phase": "binding",
+                    "codec": specification.codec,
+                    "path": str(specification.path),
+                    "error": str(error),
+                },
+            ) from error
+        if not isinstance(specification.writable, bool):
+            raise InvalidRequest("configuration write authority must be boolean")
+        if initializing and not specification.writable:
+            raise ConfigurationReadOnly(
+                "configuration initialization requires writable authority",
+                details={
+                    "phase": "binding",
+                    "path": str(specification.path),
+                },
+            )
+        return replace(
+            specification,
+            path=Path(specification.path),
             layout=selected_layout,
-            writable=True,
-            repository_path=repository_path,
+            repository_path=(
+                Path(specification.repository_path)
+                if specification.repository_path is not None
+                else None
+            ),
         )
 
     def inspect_extension_outcomes(self, extension_id: str):
@@ -674,13 +812,31 @@ class OpenLease:
                 extension_id,
                 ConfigurationLayout(layout),
             )
-            if registration.validator is not None:
-                registration.validator(selected)
         except (OSError, CodecError, ValueError) as error:
-            raise InvalidRequest(
+            raise ConfigurationDecodeFailed(
                 f"invalid {codec} configuration binding: {identifier}",
-                details={"error": str(error)},
+                details={
+                    "phase": "decode",
+                    "binding": identifier,
+                    "codec": codec,
+                    "path": str(source.resolve()),
+                    "error": str(error),
+                },
             ) from error
+        if registration.validator is not None:
+            try:
+                registration.validator(selected)
+            except Exception as error:
+                raise ConfigurationValidationFailed(
+                    "extension configuration validation failed",
+                    details={
+                        "phase": "validation",
+                        "binding": identifier,
+                        "codec": codec,
+                        "path": str(source.resolve()),
+                        "error": str(error),
+                    },
+                ) from error
 
         def transform(state: OpenLeaseState) -> OpenLeaseState:
             existing = next(
@@ -2119,6 +2275,7 @@ class OpenLease:
                     details={
                         "extension": manifest.identifier,
                         "version": manifest.contract_version,
+                        "expected_version": EXTENSION_CONTRACT_VERSION,
                     },
                 )
             if manifest.identifier in results:

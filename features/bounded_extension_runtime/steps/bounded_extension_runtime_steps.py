@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+from types import MappingProxyType
+
 from behave import given, then, when
 
-from features.support.openlease_support import capture
+from features.support.openlease_support import capture, ensure_topology, space
 from openlease import (
+    ConfigurationLayout,
+    ConfigurationTarget,
     ExtensionManifest,
     ExtensionOperation,
     ExtensionRegistration,
@@ -11,6 +15,7 @@ from openlease import (
     InvalidRequest,
     OpenLease,
     WriteDispositionKind,
+    to_plain_managed_value,
 )
 
 
@@ -39,7 +44,7 @@ def bind(context):
     )
 
 
-@given("two current extensions declare named operations")
+@given("two version-three extensions declare named operations")
 def given_two_extensions(context) -> None:
     context.calls = []
 
@@ -57,6 +62,46 @@ def given_two_extensions(context) -> None:
         )
         for identifier in ("zpp.traits", "zpp.behave")
     )
+
+
+@given("a version-two extension declares a named operation")
+def given_version_two_extension(context) -> None:
+    context.calls = []
+
+    def operation(_invocation):
+        context.calls.append("operation")
+
+    context.registrations = (
+        ExtensionRegistration(
+            ExtensionManifest("former", 2),
+            operations=(ExtensionOperation("run", operation),),
+        ),
+    )
+
+
+@when("the host attempts to construct the bounded runtime")
+def when_attempt_construct(context) -> None:
+    capture(
+        context,
+        lambda: OpenLease(
+            context.root / "state",
+            openspec=context.openspec,
+            extensions=context.registrations,
+        ),
+    )
+
+
+@then("registration fails with version-three guidance")
+def then_version_three_guidance(context) -> None:
+    assert isinstance(context.error, InvalidRequest)
+    assert context.error.details["version"] == 2
+    assert context.error.details["expected_version"] == 3
+
+
+@then("no extension code or managed write runs")
+def then_no_rejected_effects(context) -> None:
+    assert context.calls == []
+    assert not (context.root / "state" / "extensions").exists()
 
 
 @when("the host constructs the bounded runtime")
@@ -143,9 +188,147 @@ def then_validation_first(context) -> None:
     assert context.called is False
 
 
+@then("the error is configuration_validation_failed")
+def then_validation_code(context) -> None:
+    assert context.error.code == "configuration_validation_failed"
+
+
 @then("no managed record is created")
 def then_no_record(context) -> None:
     assert not (context.root / "state" / "extensions").exists()
+
+
+@given("a bound extension with ordered configuration sources")
+def given_ordered_configuration(context) -> None:
+    context.system = OpenLease(
+        context.root / "state",
+        openspec=context.openspec,
+        extensions=(ExtensionRegistration(ExtensionManifest("zpp.behave")),),
+    )
+    ensure_topology(context)
+    space(context, "work")
+    machine = context.root / "machine.json"
+    repository = context.repos["repo-1"] / "behavior.json"
+    machine.write_text('{"runner": "machine", "low": true}', encoding="utf-8")
+    repository.write_text('{"runner": "repository"}', encoding="utf-8")
+    context.system.bind_configuration_source(
+        "zpp.behave",
+        "machine",
+        machine,
+        "machine",
+        codec="json",
+        layout="dedicated",
+    )
+    context.system.bind_configuration_source(
+        "zpp.behave",
+        "repository",
+        repository,
+        "repository",
+        "repo-1",
+        codec="json",
+        layout="dedicated",
+    )
+    context.bound = context.system.bind_extension(
+        "zpp.behave",
+        "work",
+        ConfigurationTarget.repository("repo-1"),
+    )
+
+
+@when("the host requests its public configuration snapshot record")
+def when_request_snapshot_record(context) -> None:
+    context.snapshot_record = context.bound.config.snapshot_record()
+
+
+@then("the record identifies every binding and the winning source for each key")
+def then_record_explains_sources(context) -> None:
+    assert [item.identifier for item in context.snapshot_record.bindings] == [
+        "machine",
+        "repository",
+    ]
+    assert context.snapshot_record.winners == {
+        "runner": "repository",
+        "low": "machine",
+    }
+    assert all(item.content_digest for item in context.snapshot_record.bindings)
+
+
+@then("configuration exposes result-returning mutations while data and cache do not")
+def then_configuration_protocol_is_specific(context) -> None:
+    assert hasattr(context.bound.config, "snapshot_record")
+    assert hasattr(context.bound.config, "set")
+    assert hasattr(context.bound.config, "delete")
+    assert not hasattr(context.bound.data, "snapshot_record")
+    assert not hasattr(context.bound.cache, "snapshot_record")
+
+
+@given("a bound extension with one writable configuration source")
+def given_one_writable_source(context) -> None:
+    context.system = OpenLease(
+        context.root / "state",
+        openspec=context.openspec,
+        extensions=(ExtensionRegistration(ExtensionManifest("zpp.behave")),),
+    )
+    context.source = context.root / "config.json"
+    context.source.write_text('{"runner": "argv", "remove": true}', encoding="utf-8")
+    context.bound = context.system.bind_extension_document(
+        "zpp.behave",
+        context.source,
+        codec="json",
+        layout=ConfigurationLayout.DEDICATED,
+        writable=True,
+    )
+
+
+@when("the host explicitly sets and deletes configuration keys")
+def when_explicitly_mutate(context) -> None:
+    context.dispositions = (
+        context.bound.config.set("runner", "go-task"),
+        context.bound.config.delete("remove"),
+    )
+    context.bound.config["automatic"] = True
+
+
+@then("each call returns its exact completed write disposition")
+def then_exact_dispositions(context) -> None:
+    assert [item.key for item in context.dispositions] == ["runner", "remove"]
+    assert all(
+        item.kind is WriteDispositionKind.COMMITTED for item in context.dispositions
+    )
+    assert all(item.path == context.source.resolve() for item in context.dispositions)
+    assert all(item.binding_id for item in context.dispositions)
+
+
+@then("mapping assignment still saves automatically")
+def then_assignment_still_saves(context) -> None:
+    assert context.bound.config["automatic"] is True
+    assert context.bound.config.last_write.key == "automatic"
+
+
+@given("an immutable managed configuration snapshot with nested values")
+def given_immutable_snapshot(context) -> None:
+    context.managed = MappingProxyType(
+        {"runner": "argv", "nested": MappingProxyType({"targets": ("bdd",)})}
+    )
+
+
+@when("a dependent product converts it through the public plain-value helper")
+def when_convert_plain(context) -> None:
+    context.plain = to_plain_managed_value(context.managed)
+
+
+@then("it receives independent ordinary dictionaries and lists")
+def then_plain_containers(context) -> None:
+    assert type(context.plain) is dict
+    assert type(context.plain["nested"]) is dict
+    assert type(context.plain["nested"]["targets"]) is list
+    context.plain["nested"]["targets"].append("unit")
+    assert context.managed["nested"]["targets"] == ("bdd",)
+
+
+@then("supported scalar values retain their meaning")
+def then_plain_scalars(context) -> None:
+    assert context.plain["runner"] == "argv"
 
 
 @given("an operation writes durable data and cache before failing")

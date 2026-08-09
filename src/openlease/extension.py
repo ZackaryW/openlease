@@ -13,7 +13,7 @@ from openlease.configuration_codec import (
 )
 from openlease.core.configuration import ConfigurationTarget, ExtensionRoots
 
-EXTENSION_CONTRACT_VERSION = 2
+EXTENSION_CONTRACT_VERSION = 3
 
 
 class CallbackEvent(StrEnum):
@@ -155,6 +155,16 @@ class DirectDocumentTarget:
 
 
 @dataclass(frozen=True, slots=True)
+class ExtensionDocumentBinding:
+    extension_id: str
+    path: Path
+    codec: str
+    layout: ConfigurationLayout
+    writable: bool = False
+    repository_path: Path | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class ExtensionContext:
     extension_id: str
     target_kind: str
@@ -195,11 +205,19 @@ class ManagedMapping(Protocol):
     def snapshot(self) -> Mapping[str, ManagedValue]: ...
 
 
+class ManagedConfiguration(ManagedMapping, Protocol):
+    def snapshot_record(self) -> EffectiveConfigurationSnapshot: ...
+
+    def set(self, key: str, value: ManagedValue) -> WriteDisposition: ...
+
+    def delete(self, key: str) -> WriteDisposition: ...
+
+
 @dataclass(frozen=True, slots=True)
 class ExtensionInvocation:
     input: object
     context: ExtensionContext
-    config: ManagedMapping
+    config: ManagedConfiguration
     data: ManagedMapping
     cache: ManagedMapping
     event: ExtensionEvent | None = None
@@ -262,7 +280,7 @@ class ExtensionInvocationResult:
 class BoundExtension:
     extension_id: str
     context: ExtensionContext
-    config: ManagedMapping
+    config: ManagedConfiguration
     data: ManagedMapping
     cache: ManagedMapping
     _invoke: Callable[[str, object], ExtensionInvocationResult]

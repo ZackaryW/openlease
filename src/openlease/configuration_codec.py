@@ -99,6 +99,16 @@ def plain_managed_value(value: object) -> object:
     return value
 
 
+def to_plain_managed_value(value: ManagedValue) -> object:
+    """Copy a supported managed value into ordinary mutable containers."""
+    validate_managed_value(value)
+    if isinstance(value, Mapping):
+        return {key: to_plain_managed_value(child) for key, child in value.items()}
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        return [to_plain_managed_value(child) for child in value]
+    return value
+
+
 class YamlCodec:
     name = "yaml"
 

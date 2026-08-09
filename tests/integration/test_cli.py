@@ -312,3 +312,44 @@ def test_cli_rejects_an_ambiguous_extension_target_without_partial_state(
     assert failed.exit_code == 2
     assert json.loads(failed.stderr)["outcome"] == "invalid_request"
     assert OpenLease(state_root).snapshot() == before
+
+
+def test_cli_configuration_failure_includes_stable_code(tmp_path: Path) -> None:
+    runner = CliRunner()
+    state_root = tmp_path / "state"
+    repository = _repository(tmp_path / "repo")
+    source = tmp_path / "invalid.json"
+    source.write_text("not-json", encoding="utf-8")
+    commands = (
+        ("register", "repository", "repo", str(repository)),
+        ("space", "create", "work"),
+        ("associate", "repo", "--space", "work"),
+    )
+    for command in commands:
+        completed = runner.invoke(app, ["--state-root", str(state_root), *command])
+        assert completed.exit_code == 0, completed.output
+
+    failed = runner.invoke(
+        app,
+        [
+            "--state-root",
+            str(state_root),
+            "--json",
+            "config",
+            "bind",
+            "zpp",
+            "machine",
+            str(source),
+            "--scope",
+            "machine",
+            "--codec",
+            "json",
+            "--layout",
+            "dedicated",
+        ],
+    )
+
+    assert failed.exit_code == 2
+    envelope = json.loads(failed.stderr)
+    assert envelope["code"] == "configuration_decode_failed"
+    assert envelope["outcome"] == "invalid_request"

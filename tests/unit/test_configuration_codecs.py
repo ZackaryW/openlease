@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime, time
+from types import MappingProxyType
 
 import pytest
 
@@ -13,6 +14,7 @@ from openlease.configuration_codec import (
     YamlCodec,
     project_namespace,
     replace_namespace,
+    to_plain_managed_value,
 )
 
 
@@ -149,3 +151,33 @@ def test_managed_temporal_values_are_supported_by_toml() -> None:
     decoded = codec.decode(codec.encode(codec.new_document(values)))
 
     assert dict(codec.root_mapping(decoded)) == values
+
+
+def test_public_plain_conversion_copies_the_strict_managed_graph() -> None:
+    source = MappingProxyType(
+        {
+            "nested": MappingProxyType({"items": ("one", "two")}),
+            "date": date(2026, 8, 9),
+        }
+    )
+
+    plain = to_plain_managed_value(source)
+
+    assert plain == {
+        "nested": {"items": ["one", "two"]},
+        "date": date(2026, 8, 9),
+    }
+    assert type(plain) is dict
+    assert type(plain["nested"]) is dict
+    assert type(plain["nested"]["items"]) is list
+    plain["nested"]["items"].append("three")
+    assert source["nested"]["items"] == ("one", "two")
+
+
+def test_public_plain_conversion_rejects_codec_round_trip_objects() -> None:
+    class CodecContainer:
+        def unwrap(self):
+            return {"silently": "accepted"}
+
+    with pytest.raises(CodecError, match="unsupported managed value"):
+        to_plain_managed_value(CodecContainer())

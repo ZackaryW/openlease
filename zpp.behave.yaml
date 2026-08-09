@@ -16,6 +16,8 @@ commands:
           - pyproject.toml
           - uv.lock
           - zpp.behave.yaml
+          - README.md
+          - docs/extension-runtime.md
           - src/openlease/__init__.py
           - src/openlease/configuration_codec.py
           - src/openlease/errors.py
@@ -121,6 +123,8 @@ commands:
           - pyproject.toml
           - uv.lock
           - zpp.behave.yaml
+          - README.md
+          - docs/extension-runtime.md
           - src/openlease/__init__.py
           - src/openlease/configuration_codec.py
           - src/openlease/errors.py

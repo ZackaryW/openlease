@@ -98,7 +98,7 @@ result envelope.
 
 ## Extension configuration
 
-Dependent products explicitly register version-two extensions and delegate generic
+Dependent products explicitly register version-three extensions and delegate generic
 configuration and confined storage plumbing to OpenLease. Registration is inert:
 configuration never selects a runner, invokes an operation, or authorizes Git.
 The extension still owns its schema, defaults, and product meaning.
@@ -114,16 +114,19 @@ from pathlib import Path
 
 from openlease import (
     ConfigurationLayout,
+    ExtensionDocumentBinding,
     ExtensionManifest,
     ExtensionOperation,
     ExtensionRegistration,
     OpenLease,
 )
 
+
 def verify(invocation):
     runner = invocation.config["runner"]
     invocation.data["last-runner"] = runner
     return {"selected": runner}
+
 
 zpp_root = Path.home() / ".zpp"
 system = OpenLease(
@@ -137,15 +140,31 @@ system = OpenLease(
 )
 system.set_extension_roots("zpp.behave", product_root=zpp_root)
 behavior = system.bind_extension_document(
-    "zpp.behave",
-    Path("zpp.behave.yaml"),
-    codec="yaml",
-    layout=ConfigurationLayout.DEDICATED,
-    writable=True,
+    ExtensionDocumentBinding(
+        extension_id="zpp.behave",
+        path=Path("zpp.behave.yaml"),
+        codec="yaml",
+        layout=ConfigurationLayout.DEDICATED,
+        writable=True,
+    ),
 )
-behavior.config["runner"] = "go-task"  # Saved atomically; no save() call.
+write = behavior.config.set("runner", "go-task")  # Saved atomically.
+provenance = behavior.config.snapshot_record()
 result = behavior.invoke("verify", {"targets": ["bdd"]})
 ```
+
+Scalar direct-binding calls remain supported. Assignment and deletion also retain
+their mapping syntax; use `set()` or `delete()` when the caller needs the completed
+`WriteDisposition`. `snapshot()` returns effective immutable values, while
+`snapshot_record()` additionally explains bindings, digests, winners, and observed
+generations. `to_plain_managed_value()` converts a managed snapshot into independent
+ordinary dictionaries and lists for downstream validation.
+
+Configuration failures are public `InvalidRequest` subclasses with stable codes:
+`configuration_read_only`, `configuration_validation_failed`,
+`configuration_path_changed`, `configuration_decode_failed`, and
+`configuration_conflict`. JSON CLI errors include the same code without changing
+their `invalid_request` outcome or status 2.
 
 This lets rebuilt ZPP retain `.zpp` as its product root without independently
 resolving homes, repositories, saved profiles, or generated worktrees. A reusable

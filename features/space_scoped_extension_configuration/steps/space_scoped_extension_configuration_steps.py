@@ -1,20 +1,32 @@
 from __future__ import annotations
 
 import json
+import warnings
 
 from behave import given, then, when
+from typer.testing import CliRunner
 
-from features.support.openlease_support import capture, ensure_topology, space
+from features.support.openlease_support import (
+    capture,
+    ensure_topology,
+    repository,
+    space,
+)
 from openlease import (
+    ConfigurationConflict,
+    ConfigurationDecodeFailed,
     ConfigurationLayout,
+    ConfigurationPathChanged,
+    ConfigurationReadOnly,
     ConfigurationTarget,
+    ExtensionDocumentBinding,
     ExtensionManifest,
     ExtensionRegistration,
     InvalidRequest,
     OpenLease,
 )
+from openlease.cli import app
 from openlease.core.state_codec import StateFormatError
-from openlease.extension_runtime import ConfigurationConflict
 
 
 def current_system(context, *identifiers: str) -> OpenLease:
@@ -249,9 +261,10 @@ def when_competing_assignments(context) -> None:
     capture(context, lambda: context.second.config.__setitem__("key", "second"))
 
 
-@then("the second assignment reports a configuration conflict")
+@then("the second assignment reports configuration_conflict")
 def then_conflict(context) -> None:
     assert isinstance(context.error, ConfigurationConflict)
+    assert context.error.code == "configuration_conflict"
 
 
 @then("the first replacement remains authoritative")
@@ -285,16 +298,91 @@ def when_assigning_through_replaced_binding(context) -> None:
     capture(context, lambda: context.bound.config.__setitem__("key", "escaped"))
 
 
-@then("the configuration mutation reports a path-change error")
+@then("the configuration mutation reports configuration_path_changed")
 def then_path_change_reported(context) -> None:
-    assert isinstance(context.error, InvalidRequest)
-    assert "configuration source path changed" in str(context.error)
+    assert isinstance(context.error, ConfigurationPathChanged)
+    assert context.error.code == "configuration_path_changed"
 
 
 @then("the symlink and its external target remain unchanged")
 def then_symlink_target_unchanged(context) -> None:
     assert context.source.is_symlink()
     assert json.loads(context.external.read_text(encoding="utf-8")) == {"key": "bound"}
+
+
+@given("a direct read-only configuration document")
+def given_read_only_direct(context) -> None:
+    current_system(context, "extension")
+    context.source = context.root / "read-only.json"
+    context.source.write_text('{"key": "value"}', encoding="utf-8")
+    context.before = context.source.read_bytes()
+    context.bound = context.system.bind_extension_document(
+        "extension", context.source, codec="json", layout="dedicated"
+    )
+
+
+@when("the caller explicitly sets a configuration key")
+def when_set_read_only(context) -> None:
+    capture(context, lambda: context.bound.config.set("key", "changed"))
+
+
+@then("the mutation reports configuration_read_only")
+def then_read_only_code(context) -> None:
+    assert isinstance(context.error, ConfigurationReadOnly)
+    assert context.error.code == "configuration_read_only"
+
+
+@given("an invalid explicitly declared configuration document")
+def given_invalid_cli_document(context) -> None:
+    context.cli = CliRunner()
+    context.cli_state = context.root / "cli-state"
+    context.cli_repo = repository(context.root / "cli-repo")
+    context.source = context.root / "invalid.json"
+    context.source.write_text("not-json", encoding="utf-8")
+
+
+@when("the host binds it through the JSON CLI")
+def when_bind_invalid_cli(context) -> None:
+    for command in (
+        ("register", "repository", "repo", str(context.cli_repo)),
+        ("space", "create", "work"),
+        ("associate", "repo", "--space", "work"),
+    ):
+        completed = context.cli.invoke(
+            app, ["--state-root", str(context.cli_state), *command]
+        )
+        assert completed.exit_code == 0, completed.output
+    context.cli_result = context.cli.invoke(
+        app,
+        [
+            "--state-root",
+            str(context.cli_state),
+            "--json",
+            "config",
+            "bind",
+            "zpp",
+            "machine",
+            str(context.source),
+            "--scope",
+            "machine",
+            "--codec",
+            "json",
+            "--layout",
+            "dedicated",
+        ],
+    )
+
+
+@then("the CLI reports configuration_decode_failed with an invalid_request outcome")
+def then_cli_decode_code(context) -> None:
+    envelope = json.loads(context.cli_result.stderr)
+    assert envelope["code"] == ConfigurationDecodeFailed.code
+    assert envelope["outcome"] == "invalid_request"
+
+
+@then("exits with status 2")
+def then_cli_status_two(context) -> None:
+    assert context.cli_result.exit_code == 2
 
 
 @given("a direct dedicated document contains a nested mapping")
@@ -364,6 +452,101 @@ def then_no_truncate(context) -> None:
     )
     assert isinstance(context.error, InvalidRequest)
     assert context.source.read_bytes() == before
+
+
+@given("an explicit binding value with codec layout path and write authority")
+def given_explicit_binding_value(context) -> None:
+    current_system(context, "extension")
+    context.existing = context.root / "existing.yaml"
+    context.created = context.root / "created.yaml"
+    context.existing.write_text("key: existing\n", encoding="utf-8")
+    context.open_binding = ExtensionDocumentBinding(
+        "extension",
+        context.existing,
+        "yaml",
+        ConfigurationLayout.DEDICATED,
+        False,
+    )
+    context.initialize_binding = ExtensionDocumentBinding(
+        "extension",
+        context.created,
+        "yaml",
+        ConfigurationLayout.DEDICATED,
+        True,
+    )
+
+
+@when("the host opens and initializes documents through that binding shape")
+def when_use_binding_values(context) -> None:
+    context.opened = context.system.bind_extension_document(context.open_binding)
+    context.initialized = context.system.initialize_extension_document(
+        context.initialize_binding,
+        initial={"key": "created"},
+        boundary=context.root,
+    )
+
+
+@then("both operations preserve the declared binding metadata")
+def then_binding_metadata(context) -> None:
+    opened = context.opened.config.snapshot_record().bindings[0]
+    initialized = context.initialized.config.snapshot_record().bindings[0]
+    assert opened.canonical_path == context.existing.resolve()
+    assert initialized.canonical_path == context.created.resolve()
+    assert opened.writable is False
+    assert initialized.writable is True
+
+
+@then("neither codec nor layout is inferred")
+def then_no_binding_inference(context) -> None:
+    for bound in (context.opened, context.initialized):
+        binding = bound.config.snapshot_record().bindings[0]
+        assert binding.codec == "yaml"
+        assert binding.layout is ConfigurationLayout.DEDICATED
+
+
+@given("equivalent object and scalar direct-document bindings")
+def given_equivalent_binding_forms(context) -> None:
+    current_system(context, "extension")
+    context.source = context.root / "equivalent.json"
+    context.source.write_text('{"key": "value"}', encoding="utf-8")
+    context.binding = ExtensionDocumentBinding(
+        "extension",
+        context.source,
+        "json",
+        ConfigurationLayout.DEDICATED,
+    )
+
+
+@when("the host opens each existing document")
+def when_open_both_forms(context) -> None:
+    context.object_bound = context.system.bind_extension_document(context.binding)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        context.scalar_bound = context.system.bind_extension_document(
+            "extension",
+            context.source,
+            codec="json",
+            layout=ConfigurationLayout.DEDICATED,
+        )
+    context.binding_warnings = tuple(caught)
+
+
+@then("both forms produce the same configuration and provenance")
+def then_binding_forms_match(context) -> None:
+    assert (
+        context.object_bound.config.snapshot() == context.scalar_bound.config.snapshot()
+    )
+    assert context.object_bound.config.snapshot_record().bindings == (
+        context.scalar_bound.config.snapshot_record().bindings
+    )
+
+
+@then("the scalar form is not deprecated")
+def then_scalar_not_deprecated(context) -> None:
+    assert not any(
+        issubclass(item.category, DeprecationWarning)
+        for item in context.binding_warnings
+    )
 
 
 @given("a prior-schema state references an authored YAML document")
