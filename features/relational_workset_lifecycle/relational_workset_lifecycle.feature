@@ -92,3 +92,47 @@ Feature: Build relational OpenLease spaces
     When a lifecycle operation would replace or remove that projection
     Then OpenLease reports an ownership conflict
     And preserves the modified projection and unrelated user worksets
+
+  Scenario: Reuse one cwd-selected draft within a host session
+    Given a registered repository has no matching temporary space
+    When successive commands omit explicit space selection from directories within its worktree and use one host-session token
+    Then OpenLease selects one temporary draft associated with that repository
+    And the draft has no affected claim or lease
+    And no topology is inferred from the working directory
+
+  Scenario: Prefer an explicitly selected durable space
+    Given a host-session token and cwd could select a temporary space
+    And a durable space is explicitly selected
+    When OpenLease resolves the command context
+    Then it selects the explicit durable space
+    And creates or reclaims no temporary space
+
+  Scenario: Reject cwd outside the registered topology
+    Given cwd does not resolve uniquely to one registered Git worktree
+    When a command omits explicit space selection
+    Then OpenLease rejects implicit selection
+    And creates no space or topology
+
+  Scenario: Reclaim an abandoned disposable draft
+    Given an ended host session left a clean temporary draft for one canonical worktree
+    When a new host session implicitly selects that worktree
+    Then OpenLease rebinds the existing draft to the new session atomically
+    And preserves its space identity and complete draft shape
+
+  Scenario: Preserve retained state when selecting the same worktree
+    Given a prior matching space carries lease or recovery evidence
+    When a new host session implicitly selects that worktree
+    Then OpenLease preserves the prior space and its evidence unchanged
+    And scaffolds a distinct temporary draft for the new session
+
+  Scenario: Remove an unused draft when its host session ends
+    Given a host session owns a temporary space that remains fully disposable
+    When that host session closes
+    Then OpenLease removes only that temporary space
+    And preserves registered topology and every other space
+
+  Scenario: Promote temporary work at the first durable boundary
+    Given a host session owns a temporary space with a complete explicit affected claim
+    When the space atomically acquires its complete lease set
+    Then OpenLease clears its temporary ownership in the same transition
+    And retains it as a durable locked space after the host session disappears

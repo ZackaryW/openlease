@@ -81,3 +81,21 @@ Feature: Lease affected OpenSpec authorities without false collisions
     When the owner releases or reconciles the space
     Then OpenLease reports the child B path outside the held boundary
     And does not represent the cohort as collision-safe
+
+  Scenario: Grant no authority through implicit cwd selection
+    Given implicit cwd selection created a temporary space for a registered worktree
+    When the owner has not declared an affected claim
+    Then lockable and lock reject acquisition
+    And the session token, cwd, association, and temporary ownership grant no lease
+
+  Scenario: Preserve logical conflicts for a temporary space
+    Given a cwd-selected temporary space explicitly affects an authority covered by another active lease
+    When the temporary space runs lockable or lock
+    Then OpenLease reports the same logical conflict as an explicitly selected space
+    And no losing lease is acquired
+
+  Scenario: Plan unrelated temporary work beside an active lease
+    Given a cwd-selected temporary space explicitly affects a disconnected authority component
+    And another component has an active lease
+    When the temporary space plans its complete affected closure
+    Then the unrelated active lease does not block the plan
