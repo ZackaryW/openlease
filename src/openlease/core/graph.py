@@ -52,6 +52,16 @@ class AffectedPlan:
 
 
 @dataclass(frozen=True, slots=True)
+class SpaceGraphSnapshot:
+    plan: AffectedPlan
+    repositories: tuple[RepositoryRecord, ...]
+    authorities: tuple[AuthorityRecord, ...]
+    parents: tuple[ParentRelationship, ...]
+    dependencies: tuple[Dependency, ...]
+    conflict_authority_ids: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class Lease:
     authority_id: str
     owner_id: str
@@ -192,6 +202,112 @@ def conflicting_leases(
                 )
                 break
     return tuple(sorted(results, key=lambda item: (item.authority_id, item.owner_id)))
+
+
+def snapshot_space_graph(
+    graph: AuthorityGraph,
+    associated_repository_ids: tuple[str, ...],
+    claim: AffectedClaim,
+) -> SpaceGraphSnapshot:
+    graph = validate_graph(graph)
+    repositories = {item.identifier: item for item in graph.repositories}
+    authorities = {item.identifier: item for item in graph.authorities}
+    unknown_repositories = set(associated_repository_ids) - set(repositories)
+    if unknown_repositories:
+        raise GraphError("associated repositories contain an unknown target")
+
+    plan = resolve_affected_claim(graph, claim)
+    relevant_repository_ids = set(associated_repository_ids) | set(
+        plan.work_repositories
+    )
+    relevant_authority_ids = set(plan.held_authorities)
+    relevant_authority_ids.update(
+        item.identifier
+        for item in graph.authorities
+        if item.repository_id in associated_repository_ids
+    )
+
+    changed = True
+    while changed:
+        changed = False
+        for relationship in graph.parents:
+            if (
+                relationship.child_id in relevant_authority_ids
+                or relationship.parent_id in relevant_authority_ids
+            ):
+                before = len(relevant_authority_ids)
+                relevant_authority_ids.update(
+                    (relationship.child_id, relationship.parent_id)
+                )
+                changed = changed or len(relevant_authority_ids) != before
+        for dependency in graph.dependencies:
+            if (
+                dependency.consumer_id in relevant_repository_ids
+                or dependency.consumer_id in relevant_authority_ids
+            ):
+                before = len(relevant_authority_ids)
+                relevant_authority_ids.add(dependency.authority_id)
+                changed = changed or len(relevant_authority_ids) != before
+        before = len(relevant_repository_ids)
+        relevant_repository_ids.update(
+            authorities[item].repository_id for item in relevant_authority_ids
+        )
+        changed = changed or len(relevant_repository_ids) != before
+
+    probe_leases = tuple(
+        Lease(authority_id, "snapshot-probe") for authority_id in authorities
+    )
+    conflict_authority_ids = tuple(
+        sorted(
+            item.authority_id for item in conflicting_leases(graph, plan, probe_leases)
+        )
+    )
+    return SpaceGraphSnapshot(
+        plan,
+        tuple(
+            sorted(
+                (
+                    item
+                    for item in graph.repositories
+                    if item.identifier in relevant_repository_ids
+                ),
+                key=lambda item: item.identifier,
+            )
+        ),
+        tuple(
+            sorted(
+                (
+                    item
+                    for item in graph.authorities
+                    if item.identifier in relevant_authority_ids
+                ),
+                key=lambda item: item.identifier,
+            )
+        ),
+        tuple(
+            sorted(
+                (
+                    item
+                    for item in graph.parents
+                    if item.child_id in relevant_authority_ids
+                    or item.parent_id in relevant_authority_ids
+                ),
+                key=lambda item: (item.child_id, item.parent_id),
+            )
+        ),
+        tuple(
+            sorted(
+                (
+                    item
+                    for item in graph.dependencies
+                    if item.consumer_id in relevant_repository_ids
+                    or item.consumer_id in relevant_authority_ids
+                ),
+                key=lambda item: (item.consumer_id, item.authority_id, item.access),
+            )
+        ),
+        conflict_authority_ids,
+    )
 
 
 def audit_authority_boundaries(
