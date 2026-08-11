@@ -62,6 +62,13 @@ class PreparedArtifactRecord:
 
 
 @dataclass(frozen=True, slots=True)
+class TemporarySpaceDescriptor:
+    repository_id: str
+    worktree_path: str
+    session_fingerprint: str
+
+
+@dataclass(frozen=True, slots=True)
 class SpaceRecord:
     identifier: str
     status: str = "draft"
@@ -77,6 +84,7 @@ class SpaceRecord:
     projection_fingerprint: str | None = None
     preparation_artifacts: tuple[PreparedArtifactRecord, ...] = ()
     handoff_disposition: str | None = None
+    temporary: TemporarySpaceDescriptor | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -151,7 +159,7 @@ class OpenLeaseState:
     configuration_packs: tuple[ConfigurationPackRecord, ...] = ()
     configuration_sources: tuple[ConfigurationSourceRecord, ...] = ()
     space_pack_attachments: tuple[SpacePackAttachmentRecord, ...] = ()
-    schema_version: int = 3
+    schema_version: int = 4
 
 
 def structural_key(value: object) -> str:
@@ -172,9 +180,7 @@ def structural_key(value: object) -> str:
             return {"$managed": "time", "value": item.isoformat()}
         if isinstance(item, Mapping):
             return {str(key): normalize(child) for key, child in item.items()}
-        if isinstance(item, Sequence) and not isinstance(
-            item, (str, bytes, bytearray)
-        ):
+        if isinstance(item, Sequence) and not isinstance(item, (str, bytes, bytearray)):
             return [normalize(child) for child in item]
         if item is None or isinstance(item, (str, int, float, bool)):
             return item
@@ -213,7 +219,7 @@ def decode_state(source: bytes) -> OpenLeaseState:
         "configuration_sources",
         "space_pack_attachments",
     }
-    if schema_version != 3:
+    if schema_version not in {3, 4}:
         raise StateFormatError(
             "unsupported OpenLease state schema; reinitialize OpenLease state"
         )
@@ -323,7 +329,7 @@ def encode_state(state: OpenLeaseState) -> bytes:
 
 
 def validate_state(state: OpenLeaseState) -> OpenLeaseState:
-    if state.schema_version != 3:
+    if state.schema_version != 4:
         raise StateFormatError(
             "unsupported OpenLease state schema; reinitialize OpenLease state"
         )
@@ -361,6 +367,17 @@ def validate_state(state: OpenLeaseState) -> OpenLeaseState:
             raise StateFormatError(f"space {space.identifier} has a missing repository")
         if not set(space.affected_authority_ids) <= known_authorities:
             raise StateFormatError(f"space {space.identifier} has a missing authority")
+        if space.temporary is not None:
+            if space.temporary.repository_id not in known_repositories:
+                raise StateFormatError(
+                    f"space {space.identifier} temporary repository is missing"
+                )
+            if not Path(space.temporary.worktree_path).is_absolute():
+                raise StateFormatError("temporary worktree path must be absolute")
+            _string(
+                space.temporary.session_fingerprint,
+                "temporary session fingerprint",
+            )
     for lease in state.leases:
         if (
             lease.authority_id not in known_authorities
@@ -548,6 +565,22 @@ def _prepared_artifact(value: dict[str, Any]) -> PreparedArtifactRecord:
     )
 
 
+def _temporary_space_descriptor(value: object) -> TemporarySpaceDescriptor | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise StateFormatError("invalid temporary space descriptor")
+    _require_keys(
+        value,
+        {"repository_id", "worktree_path", "session_fingerprint"},
+    )
+    return TemporarySpaceDescriptor(
+        _string(value.get("repository_id"), "temporary repository"),
+        _string(value.get("worktree_path"), "temporary worktree path"),
+        _string(value.get("session_fingerprint"), "temporary session fingerprint"),
+    )
+
+
 def _space(value: dict[str, Any]) -> SpaceRecord:
     allowed = {
         "identifier",
@@ -564,6 +597,7 @@ def _space(value: dict[str, Any]) -> SpaceRecord:
         "projection_fingerprint",
         "preparation_artifacts",
         "handoff_disposition",
+        "temporary",
     }
     _require_keys(value, allowed)
     return SpaceRecord(
@@ -605,6 +639,7 @@ def _space(value: dict[str, Any]) -> SpaceRecord:
         handoff_disposition=_optional_string(
             value.get("handoff_disposition"), "handoff disposition"
         ),
+        temporary=_temporary_space_descriptor(value.get("temporary")),
     )
 
 

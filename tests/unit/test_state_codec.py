@@ -13,6 +13,7 @@ from openlease.core.state_codec import (
     SpacePackAttachmentRecord,
     SpaceRecord,
     StateFormatError,
+    TemporarySpaceDescriptor,
     decode_state,
     encode_state,
     structural_key,
@@ -29,6 +30,15 @@ def test_rejects_old_state_without_a_compatibility_decoder() -> None:
         decode_state(b'{"schema_version":1,"generation":4}')
 
 
+def test_reads_schema_three_spaces_as_durable_schema_four_state() -> None:
+    decoded = decode_state(
+        b'{"schema_version":3,"generation":4,"spaces":[{"identifier":"work"}]}'
+    )
+
+    assert decoded.schema_version == 4
+    assert decoded.spaces == (SpaceRecord("work"),)
+
+
 def test_round_trips_canonical_registered_state() -> None:
     state = OpenLeaseState(
         generation=3,
@@ -41,6 +51,27 @@ def test_round_trips_canonical_registered_state() -> None:
     assert decode_state(encoded) == state
     assert encoded.endswith(b"\n")
     assert b'"authorities"' in encoded
+
+
+def test_round_trips_a_temporary_space_descriptor_without_the_raw_token() -> None:
+    state = OpenLeaseState(
+        repositories=(RepositoryRecord("repo-1", "/work/repo", "/work/repo/.git"),),
+        spaces=(
+            SpaceRecord(
+                "repo-1-temporary-1",
+                associated_repository_ids=("repo-1",),
+                temporary=TemporarySpaceDescriptor(
+                    "repo-1", "/work/repo", "session-fingerprint"
+                ),
+            ),
+        ),
+    )
+
+    encoded = encode_state(state)
+
+    assert decode_state(encoded) == state
+    assert b'"session-fingerprint"' in encoded
+    assert b"raw-session-token" not in encoded
 
 
 def test_round_trips_current_configuration_binding_records(tmp_path) -> None:
