@@ -3,9 +3,11 @@ from __future__ import annotations
 from behave import given, then, when
 
 from features.support.openlease_support import (
+    blocked_successor,
     capture,
     ensure_repositories,
     ensure_topology,
+    repository,
     space,
 )
 from openlease import (
@@ -281,6 +283,77 @@ def locked_shape_preserved(context) -> None:
     after = context.system.snapshot()
     assert after.spaces == context.before.spaces
     assert after.leases == context.before.leases
+
+
+@given("a locked space owns one complete authority component")
+def locked_component(context) -> None:
+    ensure_topology(context)
+    space(context, "selected", authorities=("a",))
+    context.system.lock("selected")
+    context.before = context.system.snapshot()
+
+
+@when(
+    "the owner explicitly registers a distinct repository and authority without "
+    "relating them to that component"
+)
+@when("the owner explicitly registers a disconnected repository and authority")
+def register_disconnected_component(context) -> None:
+    path = repository(context.root / "repo-4")
+    context.system.register_repository("repo-4", path)
+    context.system.register_authority("detached", "repo-4")
+
+
+@then("OpenLease accepts the disconnected authority component atomically")
+def disconnected_component_accepted(context) -> None:
+    state = context.system.snapshot()
+    assert any(item.identifier == "repo-4" for item in state.repositories)
+    assert any(item.identifier == "detached" for item in state.authorities)
+
+
+@then("preserves the locked space's accepted shape and complete lease set")
+def unrelated_locked_shape_preserved(context) -> None:
+    after = context.system.snapshot()
+    before_space = next(
+        item for item in context.before.spaces if item.identifier == "selected"
+    )
+    after_space = next(item for item in after.spaces if item.identifier == "selected")
+    assert after_space == before_space
+    assert after.leases == context.before.leases
+
+
+@given("a deferred space retains its current accepted topology baseline")
+def deferred_current_baseline(context) -> None:
+    blocked_successor(context)
+
+
+@then("the deferred space remains eligible for promotion after its blockers clear")
+def deferred_remains_promotable(context) -> None:
+    context.system.release("blocker")
+    context.system.set_handoff_disposition("blocker", "abandoned")
+    result = context.system.lock("successor")
+    assert result.data.status == "locked"
+
+
+@when("an accepted topology addition changes its affected closure or conflict coverage")
+def change_deferred_topology(context) -> None:
+    context.system.release("blocker")
+    context.system.set_handoff_disposition("blocker", "abandoned")
+    context.system.relate_dependency("a", "shared", AccessRole.WRITABLE)
+
+
+@then("OpenLease retains scoped topology drift for that space")
+def deferred_drift_retained(context) -> None:
+    state = context.system.snapshot()
+    successor = next(item for item in state.spaces if item.identifier == "successor")
+    assert successor.graph_generation != state.graph_generation
+
+
+@then("rejects its promotion until it is explicitly replanned or replaced")
+def stale_deferred_promotion_rejected(context) -> None:
+    capture(context, lambda: context.system.lock("successor"))
+    assert isinstance(context.error, InvalidRequest)
+    assert "authority graph changed after deferral" in context.error.details
 
 
 @given("an accepted space has associated affected and pinned members")

@@ -36,6 +36,7 @@ from openlease.core.graph import (
     audit_authority_boundaries,
     conflicting_leases,
     resolve_affected_claim,
+    snapshot_space_graph,
     validate_graph,
 )
 from openlease.core.preparation import PreparationMember, plan_preparation
@@ -486,17 +487,17 @@ class OpenLease:
         checkout = self.git.inspect(path)
 
         def transform(state: OpenLeaseState) -> OpenLeaseState:
-            self._ensure_graph_mutable(state)
             if self._repository(state, identifier, required=False) is not None:
                 raise InvalidRequest(f"repository already registered: {identifier}")
             record = RepositoryRecord(
                 identifier, str(checkout.root), str(checkout.common_dir)
             )
-            return replace(
+            candidate = replace(
                 state,
                 repositories=(*state.repositories, record),
                 graph_generation=state.graph_generation + 1,
             )
+            return self._validate_graph_candidate(state, candidate)
 
         updated = self._mutate(transform)
         return CommandResult(
@@ -520,7 +521,6 @@ class OpenLease:
             raise InvalidRequest("authority path must be repository-relative")
 
         def transform(state: OpenLeaseState) -> OpenLeaseState:
-            self._ensure_graph_mutable(state)
             self._repository(state, repository_id)
             if self._authority(state, identifier, required=False) is not None:
                 raise InvalidRequest(f"authority already registered: {identifier}")
@@ -530,8 +530,7 @@ class OpenLease:
                 authorities=(*state.authorities, record),
                 graph_generation=state.graph_generation + 1,
             )
-            self._validated_graph(candidate)
-            return candidate
+            return self._validate_graph_candidate(state, candidate)
 
         updated = self._mutate(transform)
         return CommandResult(
@@ -540,7 +539,6 @@ class OpenLease:
 
     def relate_parent(self, child_id: str, parent_id: str) -> CommandResult:
         def transform(state: OpenLeaseState) -> OpenLeaseState:
-            self._ensure_graph_mutable(state)
             record = ParentRecord(child_id, parent_id)
             if record in state.parents:
                 return state
@@ -549,8 +547,7 @@ class OpenLease:
                 parents=(*state.parents, record),
                 graph_generation=state.graph_generation + 1,
             )
-            self._validated_graph(candidate)
-            return candidate
+            return self._validate_graph_candidate(state, candidate)
 
         before = self.snapshot()
         updated = self._mutate_graph_error(transform)
@@ -567,7 +564,6 @@ class OpenLease:
         access: AccessRole = AccessRole.WRITABLE,
     ) -> CommandResult:
         def transform(state: OpenLeaseState) -> OpenLeaseState:
-            self._ensure_graph_mutable(state)
             record = DependencyRecord(consumer_id, authority_id, access.value)
             if record in state.dependencies:
                 return state
@@ -576,8 +572,7 @@ class OpenLease:
                 dependencies=(*state.dependencies, record),
                 graph_generation=state.graph_generation + 1,
             )
-            self._validated_graph(candidate)
-            return candidate
+            return self._validate_graph_candidate(state, candidate)
 
         before = self.snapshot()
         updated = self._mutate_graph_error(transform)
@@ -1428,9 +1423,7 @@ class OpenLease:
         for repository_id in completed:
             for callback in cohort_callbacks:
                 callback_outcomes.append(
-                    self._dispatch_reconcile_callback(
-                        space_id, repository_id, callback
-                    )
+                    self._dispatch_reconcile_callback(space_id, repository_id, callback)
                 )
         return CommandResult(
             "reconcile_apply",
@@ -2137,11 +2130,86 @@ class OpenLease:
             )
         )
 
-    def _ensure_graph_mutable(self, state: OpenLeaseState) -> None:
-        if state.leases:
-            raise InvalidRequest(
-                "authority graph cannot change while leases are active"
+    def _validate_graph_candidate(
+        self, state: OpenLeaseState, candidate: OpenLeaseState
+    ) -> OpenLeaseState:
+        current_graph = self._validated_graph(state)
+        candidate_graph = self._validated_graph(candidate)
+        lease_owner_ids = tuple(sorted({item.owner_id for item in state.leases}))
+        for owner_id in lease_owner_ids:
+            space = self._space(state, owner_id)
+            claim = AffectedClaim(
+                space.affected_repository_ids, space.affected_authority_ids
             )
+            current_snapshot = snapshot_space_graph(
+                current_graph, space.associated_repository_ids, claim
+            )
+            candidate_snapshot = snapshot_space_graph(
+                candidate_graph, space.associated_repository_ids, claim
+            )
+            changed = tuple(
+                name
+                for name in (
+                    "plan",
+                    "repositories",
+                    "authorities",
+                    "parents",
+                    "dependencies",
+                    "conflict_authority_ids",
+                )
+                if getattr(current_snapshot, name) != getattr(candidate_snapshot, name)
+            )
+            if changed:
+                raise InvalidRequest(
+                    "authority graph change would alter a locked space",
+                    details={"space": owner_id, "changed": changed},
+                )
+            if space.held_authority_ids != candidate_snapshot.plan.held_authorities:
+                raise InvalidRequest(
+                    "authority graph change would invalidate held authorities",
+                    details={
+                        "space": owner_id,
+                        "held": space.held_authority_ids,
+                        "required": candidate_snapshot.plan.held_authorities,
+                    },
+                )
+            other_leases = tuple(
+                Lease(item.authority_id, item.owner_id)
+                for item in state.leases
+                if item.owner_id != owner_id
+            )
+            conflicts = conflicting_leases(
+                candidate_graph, candidate_snapshot.plan, other_leases
+            )
+            if conflicts:
+                raise InvalidRequest(
+                    "authority graph change would conflict existing leases",
+                    details={"space": owner_id, "conflicts": conflicts},
+                )
+
+        spaces = []
+        for space in candidate.spaces:
+            if (
+                space.status != "deferred"
+                or space.graph_generation != state.graph_generation
+            ):
+                spaces.append(space)
+                continue
+            claim = AffectedClaim(
+                space.affected_repository_ids, space.affected_authority_ids
+            )
+            current_snapshot = snapshot_space_graph(
+                current_graph, space.associated_repository_ids, claim
+            )
+            candidate_snapshot = snapshot_space_graph(
+                candidate_graph, space.associated_repository_ids, claim
+            )
+            spaces.append(
+                replace(space, graph_generation=candidate.graph_generation)
+                if current_snapshot == candidate_snapshot
+                else space
+            )
+        return replace(candidate, spaces=tuple(spaces))
 
     def _editable_space(self, state: OpenLeaseState, space_id: str) -> SpaceRecord:
         space = self._space(state, space_id)

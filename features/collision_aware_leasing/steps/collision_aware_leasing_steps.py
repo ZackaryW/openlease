@@ -14,6 +14,7 @@ from openlease import (
     AuthorityConflict,
     InvalidRequest,
 )
+from openlease.core.graph import AccessRole
 
 
 @given(
@@ -293,6 +294,54 @@ def noop_result(context) -> None:
 
 @then("does not replace identity, starting commits, leases, or projection")
 def no_lock_replacement(context) -> None:
+    assert context.system.snapshot() == context.before
+
+
+@given("one or more locked spaces hold exact accepted affected closures")
+def locked_topology_boundary(context) -> None:
+    ensure_topology(context)
+    change = context.active_outline["lease-changing topology"]
+    if change == "a writable dependency that expands a locked affected closure":
+        space(context, "owner", authorities=("a",))
+        context.system.lock("owner")
+    elif change == "containment that expands a held authority's conflict coverage":
+        context.system.register_authority("c", "repo-1", "C/openspec")
+        space(context, "owner", authorities=("a",))
+        context.system.lock("owner")
+    else:
+        context.system.register_authority("c", "repo-1", "C/openspec")
+        context.system.register_authority("d", "repo-1", "D/openspec")
+        space(context, "one", authorities=("c",))
+        space(context, "two", authorities=("d",))
+        context.system.lock("one")
+        context.system.lock("two")
+    context.before = context.system.snapshot()
+
+
+@when("the owner attempts {lease_changing_topology}")
+def attempt_lease_changing_topology(context, lease_changing_topology: str) -> None:
+    operations = {
+        "a writable dependency that expands a locked affected closure": lambda: (
+            context.system.relate_dependency("a", "shared", AccessRole.WRITABLE)
+        ),
+        "containment that expands a held authority's conflict coverage": lambda: (
+            context.system.relate_parent("c", "a")
+        ),
+        "a relationship that makes existing lease owners conflict": lambda: (
+            context.system.relate_parent("d", "c")
+        ),
+    }
+    capture(context, operations[lease_changing_topology])
+
+
+@then("OpenLease rejects the complete topology addition")
+def topology_addition_rejected(context) -> None:
+    assert isinstance(context.error, InvalidRequest)
+    assert context.error.details["space"] in {"owner", "one", "two"}
+
+
+@then("preserves the graph generation, locked spaces, and complete lease sets")
+def topology_rejection_is_atomic(context) -> None:
     assert context.system.snapshot() == context.before
 
 
