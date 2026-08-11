@@ -43,7 +43,7 @@ def test_round_trips_canonical_registered_state() -> None:
     assert b'"authorities"' in encoded
 
 
-def test_round_trips_current_configuration_binding_records() -> None:
+def test_round_trips_current_configuration_binding_records(tmp_path) -> None:
     state = OpenLeaseState(
         configuration_generation=7,
         repositories=(RepositoryRecord("repo-1", "C:/work/repo1"),),
@@ -60,7 +60,7 @@ def test_round_trips_current_configuration_binding_records() -> None:
                 "machine",
                 None,
                 "external",
-                "C:/Users/me/.zpp/traits.md",
+                str(tmp_path / "traits.md"),
                 codec="yaml",
                 layout="dedicated",
                 writable=True,
