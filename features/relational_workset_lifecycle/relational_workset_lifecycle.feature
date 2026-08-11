@@ -120,7 +120,7 @@ Feature: Build relational OpenLease spaces
     And preserves its space identity and complete draft shape
 
   Scenario: Preserve retained state when selecting the same worktree
-    Given a prior matching space carries lease or recovery evidence
+    Given a prior matching space carries lease, configuration, or recovery evidence
     When a new host session implicitly selects that worktree
     Then OpenLease preserves the prior space and its evidence unchanged
     And scaffolds a distinct temporary draft for the new session
