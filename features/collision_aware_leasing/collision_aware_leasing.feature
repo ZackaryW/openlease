@@ -63,6 +63,18 @@ Feature: Lease affected OpenSpec authorities without false collisions
     Then OpenLease returns the existing structured result
     And does not replace identity, starting commits, leases, or projection
 
+  Scenario Outline: Reject topology expansion that changes an active lease boundary
+    Given one or more locked spaces hold exact accepted affected closures
+    When the owner attempts <lease-changing topology>
+    Then OpenLease rejects the complete topology addition
+    And preserves the graph generation, locked spaces, and complete lease sets
+
+    Examples:
+      | lease-changing topology                                      |
+      | a writable dependency that expands a locked affected closure |
+      | containment that expands a held authority's conflict coverage |
+      | a relationship that makes existing lease owners conflict     |
+
   Scenario: Detect an affected-authority boundary violation
     Given a space holds only child A
     And its branch changes an OpenSpec file under child B

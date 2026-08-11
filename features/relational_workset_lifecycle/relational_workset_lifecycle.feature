@@ -63,6 +63,23 @@ Feature: Build relational OpenLease spaces
     Then OpenLease rejects the mutation
     And preserves the accepted shape and complete lease set
 
+  Scenario: Register a disconnected authority component while another space is locked
+    Given a locked space owns one complete authority component
+    When the owner explicitly registers a distinct repository and authority without relating them to that component
+    Then OpenLease accepts the disconnected authority component atomically
+    And preserves the locked space's accepted shape and complete lease set
+
+  Scenario: Preserve deferred promotion across unrelated topology expansion
+    Given a deferred space retains its current accepted topology baseline
+    When the owner explicitly registers a disconnected repository and authority
+    Then the deferred space remains eligible for promotion after its blockers clear
+
+  Scenario: Retain deferred drift after a relevant topology change
+    Given a deferred space retains its current accepted topology baseline
+    When an accepted topology addition changes its affected closure or conflict coverage
+    Then OpenLease retains scoped topology drift for that space
+    And rejects its promotion until it is explicitly replanned or replaced
+
   Scenario: Open one bounded OpenSpec projection
     Given an accepted space has associated affected and pinned members
     When the owner opens the space
