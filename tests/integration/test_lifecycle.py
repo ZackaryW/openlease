@@ -12,6 +12,7 @@ from openlease import (
     ExtensionManifest,
     ExtensionOperation,
     ExtensionRegistration,
+    InvalidRequest,
     OpenLease,
     PreparationFailed,
     ReconcileSelection,
@@ -90,6 +91,139 @@ def _space(system: OpenLease, name: str, authority: str) -> None:
     system.create_space(name)
     system.associate(name, ("repo-1", "repo-2", "repo-3"))
     system.set_affected(name, authority_ids=(authority,))
+
+
+def test_session_cwd_scaffolds_and_reuses_one_temporary_draft(
+    tmp_path: Path,
+) -> None:
+    system, repos, _ = _system(tmp_path)
+    nested = repos["repo-1"] / "nested"
+    nested.mkdir()
+
+    first = system.resolve_session_space(nested, "host-session").data
+    second = system.resolve_session_space(repos["repo-1"], "host-session").data
+
+    assert second.identifier == first.identifier
+    assert first.associated_repository_ids == ("repo-1",)
+    assert first.affected_repository_ids == ()
+    assert first.affected_authority_ids == ()
+    assert first.held_authority_ids == ()
+    assert first.temporary is not None
+    assert first.temporary.worktree_path == str(repos["repo-1"].resolve())
+    assert len(system.snapshot().spaces) == 1
+
+
+def test_session_cwd_rejects_an_unregistered_worktree_without_state_change(
+    tmp_path: Path,
+) -> None:
+    registered = _repository(tmp_path / "registered")
+    unregistered = _repository(tmp_path / "unregistered")
+    system = OpenLease(tmp_path / "state")
+    system.register_repository("registered", registered)
+    before = system.snapshot()
+
+    with pytest.raises(InvalidRequest, match="exactly one"):
+        system.resolve_session_space(unregistered, "host-session")
+
+    assert system.snapshot() == before
+
+
+def test_session_cwd_reports_a_non_git_directory_as_invalid(tmp_path: Path) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    system = OpenLease(tmp_path / "state")
+
+    with pytest.raises(InvalidRequest, match="Git checkout inspection"):
+        system.resolve_session_space(outside, "host-session")
+
+    assert system.snapshot().spaces == ()
+
+
+def test_new_session_reclaims_an_abandoned_disposable_draft(tmp_path: Path) -> None:
+    system, repos, _ = _system(tmp_path)
+
+    abandoned = system.resolve_session_space(repos["repo-1"], "session-a").data
+    reclaimed = system.resolve_session_space(repos["repo-1"], "session-b").data
+
+    assert reclaimed.identifier == abandoned.identifier
+    assert reclaimed.temporary != abandoned.temporary
+    assert len(system.snapshot().spaces) == 1
+
+
+def test_closing_a_session_removes_only_its_disposable_draft(tmp_path: Path) -> None:
+    system, repos, _ = _system(tmp_path)
+    temporary = system.resolve_session_space(repos["repo-1"], "session-a").data
+    system.create_space("durable")
+
+    closed = system.close_temporary_session("session-a")
+
+    assert closed.data["removed"] == (temporary.identifier,)
+    assert tuple(space.identifier for space in system.snapshot().spaces) == ("durable",)
+
+
+def test_lock_atomically_promotes_a_temporary_space(tmp_path: Path) -> None:
+    system, repos, _ = _system(tmp_path)
+    temporary = system.resolve_session_space(repos["repo-1"], "session-a").data
+    system.set_affected(temporary.identifier, authority_ids=("a",))
+
+    locked = system.lock(temporary.identifier).data
+
+    assert locked.status == "locked"
+    assert locked.held_authority_ids == ("a",)
+    assert locked.temporary is None
+    assert system.close_temporary_session("session-a").changed is False
+    assert system.status(temporary.identifier).data["spaces"] == (locked,)
+
+
+def test_space_scoped_configuration_promotes_before_a_new_session_selects(
+    tmp_path: Path,
+) -> None:
+    registration = ExtensionRegistration(ExtensionManifest("extension"))
+    system, repos, _ = _system(tmp_path, extensions=(registration,))
+    temporary = system.resolve_session_space(repos["repo-1"], "session-a").data
+    system.define_configuration_pack("extension", "defaults")
+
+    system.attach_configuration_pack(temporary.identifier, "extension", "defaults")
+    selected = system.resolve_session_space(repos["repo-1"], "session-b").data
+
+    retained = system.status(temporary.identifier).data["spaces"][0]
+    assert retained.temporary is None
+    assert selected.identifier != retained.identifier
+    assert selected.temporary is not None
+
+
+def test_space_scoped_configuration_source_promotes_a_temporary_space(
+    tmp_path: Path,
+) -> None:
+    registration = ExtensionRegistration(ExtensionManifest("extension"))
+    system, repos, _ = _system(tmp_path, extensions=(registration,))
+    temporary = system.resolve_session_space(repos["repo-1"], "session-a").data
+    source = repos["repo-1"] / "configuration.json"
+    source.write_text("{}", encoding="utf-8")
+
+    system.bind_configuration_source(
+        "extension",
+        "local",
+        source,
+        "space",
+        temporary.identifier,
+        codec="json",
+        layout="dedicated",
+    )
+
+    retained = system.status(temporary.identifier).data["spaces"][0]
+    assert retained.temporary is None
+
+
+def test_opening_a_projection_promotes_a_temporary_space(tmp_path: Path) -> None:
+    system, repos, _ = _system(tmp_path)
+    temporary = system.resolve_session_space(repos["repo-1"], "session-a").data
+    system.set_affected(temporary.identifier, authority_ids=("a",))
+
+    opened = system.open(temporary.identifier).data
+
+    assert opened.projection_name is not None
+    assert opened.temporary is None
 
 
 def test_sibling_spaces_lock_while_parent_conflicts(tmp_path: Path) -> None:

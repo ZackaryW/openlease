@@ -61,7 +61,16 @@ from openlease.core.state_codec import (
     SpaceMemberRecord,
     SpacePackAttachmentRecord,
     SpaceRecord,
+    TemporarySpaceDescriptor,
     structural_key,
+)
+from openlease.core.temporary_spaces import (
+    fingerprint_session_token,
+    is_disposable_temporary_space,
+    next_temporary_space_identifier,
+    promote_temporary_space,
+    resolve_registered_worktree,
+    temporary_space_matches,
 )
 from openlease.errors import (
     AuthorityConflict,
@@ -103,6 +112,7 @@ from openlease.utils.ownership import (
     inspect_projection,
     projection_fingerprint,
 )
+from openlease.utils.processes import ProcessAdapterError
 from openlease.utils.state_repository import StaleStateError, StateRepository
 
 
@@ -713,7 +723,10 @@ class OpenLease:
                 None,
             )
             if existing == record:
-                return state
+                return self._replace_space(
+                    state,
+                    promote_temporary_space(self._space(state, space_id)),
+                )
             attachments = (
                 *(
                     item
@@ -726,10 +739,14 @@ class OpenLease:
                 ),
                 record,
             )
-            return replace(
+            updated = replace(
                 state,
                 space_pack_attachments=attachments,
                 configuration_generation=state.configuration_generation + 1,
+            )
+            return self._replace_space(
+                updated,
+                promote_temporary_space(self._space(updated, space_id)),
             )
 
         self._mutate(transform)
@@ -866,6 +883,11 @@ class OpenLease:
                 existing is not None
                 and replace(record, revision=existing.revision) == existing
             ):
+                if scope_kind == "space" and scope_id is not None:
+                    return self._replace_space(
+                        state,
+                        promote_temporary_space(self._space(state, scope_id)),
+                    )
                 return state
             sources = (
                 *(
@@ -878,11 +900,17 @@ class OpenLease:
                 ),
                 record,
             )
-            return replace(
+            updated = replace(
                 state,
                 configuration_sources=sources,
                 configuration_generation=state.configuration_generation + 1,
             )
+            if scope_kind == "space" and scope_id is not None:
+                return self._replace_space(
+                    updated,
+                    promote_temporary_space(self._space(updated, scope_id)),
+                )
+            return updated
 
         updated = self._mutate(transform, expected_generation=observed.generation)
         record = next(
@@ -930,6 +958,114 @@ class OpenLease:
             data={"space": identifier, "environment": {"OPENLEASE_SPACE": identifier}},
         )
 
+    def resolve_session_space(self, cwd: Path, session_token: str) -> CommandResult:
+        try:
+            session_fingerprint = fingerprint_session_token(session_token)
+            checkout = self.git.inspect(cwd)
+        except (OSError, ValueError, ProcessAdapterError) as error:
+            raise InvalidRequest(str(error)) from error
+
+        for _attempt in range(4):
+            state = self.snapshot()
+            try:
+                repository = resolve_registered_worktree(checkout, state.repositories)
+            except ValueError as error:
+                raise InvalidRequest(str(error)) from error
+            existing = next(
+                (
+                    space
+                    for space in state.spaces
+                    if temporary_space_matches(
+                        space,
+                        repository_id=repository.identifier,
+                        worktree_path=checkout.root,
+                        session_fingerprint=session_fingerprint,
+                    )
+                ),
+                None,
+            )
+            if existing is not None:
+                return CommandResult(
+                    "resolve_session_space", changed=False, data=existing
+                )
+
+            def transform(current: OpenLeaseState) -> OpenLeaseState:
+                try:
+                    current_repository = resolve_registered_worktree(
+                        checkout, current.repositories
+                    )
+                except ValueError as error:
+                    raise InvalidRequest(str(error)) from error
+                current_existing = next(
+                    (
+                        space
+                        for space in current.spaces
+                        if temporary_space_matches(
+                            space,
+                            repository_id=current_repository.identifier,
+                            worktree_path=checkout.root,
+                            session_fingerprint=session_fingerprint,
+                        )
+                    ),
+                    None,
+                )
+                if current_existing is not None:
+                    return current
+                reclaimable = next(
+                    (
+                        space
+                        for space in current.spaces
+                        if temporary_space_matches(
+                            space,
+                            repository_id=current_repository.identifier,
+                            worktree_path=checkout.root,
+                        )
+                        and is_disposable_temporary_space(
+                            space,
+                            current.reconciliations,
+                            current.configuration_sources,
+                            current.space_pack_attachments,
+                        )
+                    ),
+                    None,
+                )
+                descriptor = TemporarySpaceDescriptor(
+                    current_repository.identifier,
+                    str(checkout.root),
+                    session_fingerprint,
+                )
+                if reclaimable is not None:
+                    return self._replace_space(
+                        current, replace(reclaimable, temporary=descriptor)
+                    )
+                identifier = next_temporary_space_identifier(
+                    current_repository.identifier,
+                    {space.identifier for space in current.spaces},
+                )
+                temporary = SpaceRecord(
+                    identifier,
+                    associated_repository_ids=(current_repository.identifier,),
+                    temporary=descriptor,
+                )
+                return replace(current, spaces=(*current.spaces, temporary))
+
+            try:
+                updated = self.repository.mutate(state.generation, transform)
+            except StaleStateError:
+                continue
+            selected = next(
+                space
+                for space in updated.spaces
+                if temporary_space_matches(
+                    space,
+                    repository_id=repository.identifier,
+                    worktree_path=checkout.root,
+                    session_fingerprint=session_fingerprint,
+                )
+            )
+            return CommandResult("resolve_session_space", data=selected)
+        raise InvalidRequest("state changed repeatedly during temporary selection")
+
     def close_session(self, identifier: str) -> CommandResult:
         state = self.snapshot()
         self._space(state, identifier)
@@ -937,6 +1073,77 @@ class OpenLease:
             "close_session",
             changed=False,
             data={"space": identifier, "unset_environment": "OPENLEASE_SPACE"},
+        )
+
+    def close_temporary_session(self, session_token: str) -> CommandResult:
+        try:
+            session_fingerprint = fingerprint_session_token(session_token)
+        except ValueError as error:
+            raise InvalidRequest(str(error)) from error
+        state = self.snapshot()
+        owned = tuple(
+            space
+            for space in state.spaces
+            if space.temporary is not None
+            and space.temporary.session_fingerprint == session_fingerprint
+        )
+        if not owned:
+            return CommandResult(
+                "close_temporary_session",
+                changed=False,
+                data={"removed": (), "promoted": ()},
+            )
+
+        removed = tuple(
+            space.identifier
+            for space in owned
+            if is_disposable_temporary_space(
+                space,
+                state.reconciliations,
+                state.configuration_sources,
+                state.space_pack_attachments,
+            )
+        )
+        promoted = tuple(
+            space.identifier for space in owned if space.identifier not in set(removed)
+        )
+
+        def transform(current: OpenLeaseState) -> OpenLeaseState:
+            current_owned = tuple(
+                space
+                for space in current.spaces
+                if space.temporary is not None
+                and space.temporary.session_fingerprint == session_fingerprint
+            )
+            disposable = {
+                space.identifier
+                for space in current_owned
+                if is_disposable_temporary_space(
+                    space,
+                    current.reconciliations,
+                    current.configuration_sources,
+                    current.space_pack_attachments,
+                )
+            }
+            return replace(
+                current,
+                spaces=tuple(
+                    promote_temporary_space(space)
+                    if space in current_owned and space.identifier not in disposable
+                    else space
+                    for space in current.spaces
+                    if space.identifier not in disposable
+                ),
+            )
+
+        updated = self._mutate(transform, expected_generation=state.generation)
+        return CommandResult(
+            "close_temporary_session",
+            data={
+                "removed": removed,
+                "promoted": promoted,
+                "generation": updated.generation,
+            },
         )
 
     def associate(
@@ -1094,12 +1301,14 @@ class OpenLease:
                     LeaseRecord(authority_id, space_id)
                     for authority_id in current_plan.held_authorities
                 )
-                locked = replace(
-                    current_space,
-                    status="locked",
-                    held_authority_ids=current_plan.held_authorities,
-                    members=locked_members,
-                    graph_generation=current.graph_generation,
+                locked = promote_temporary_space(
+                    replace(
+                        current_space,
+                        status="locked",
+                        held_authority_ids=current_plan.held_authorities,
+                        members=locked_members,
+                        graph_generation=current.graph_generation,
+                    )
                 )
                 return self._replace_space(current, locked, leases=leases)
 
@@ -1143,10 +1352,12 @@ class OpenLease:
             current_space = self._space(current, space_id)
             return self._replace_space(
                 current,
-                replace(
-                    current_space,
-                    projection_name=name,
-                    projection_fingerprint=fingerprint,
+                promote_temporary_space(
+                    replace(
+                        current_space,
+                        projection_name=name,
+                        projection_fingerprint=fingerprint,
+                    )
                 ),
             )
 

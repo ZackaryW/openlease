@@ -104,6 +104,88 @@ def test_session_attach_prints_the_parent_shell_selection(tmp_path: Path) -> Non
     assert attached.stdout == "OPENLEASE_SPACE=example\n"
 
 
+def test_cli_reuses_and_closes_a_cwd_temporary_space(
+    tmp_path: Path, monkeypatch
+) -> None:
+    runner = CliRunner()
+    state_root = tmp_path / "state"
+    repository = _repository(tmp_path / "repo")
+    OpenLease(state_root).register_repository("repo", repository)
+    monkeypatch.chdir(repository)
+    environment = {"OPENLEASE_SESSION_TOKEN": "host-session"}
+
+    first = runner.invoke(
+        app,
+        ["--state-root", str(state_root), "--json", "status"],
+        env=environment,
+    )
+    second = runner.invoke(
+        app,
+        ["--state-root", str(state_root), "--json", "status"],
+        env=environment,
+    )
+    closed = runner.invoke(
+        app,
+        ["--state-root", str(state_root), "--json", "session", "close"],
+        env=environment,
+    )
+
+    assert first.exit_code == 0, first.output
+    assert second.exit_code == 0, second.output
+    first_space = json.loads(first.stdout)["data"]["spaces"][0]
+    second_space = json.loads(second.stdout)["data"]["spaces"][0]
+    assert second_space["identifier"] == first_space["identifier"]
+    assert second_space["temporary"]["session_fingerprint"]
+    assert json.loads(closed.stdout)["data"]["removed"] == [first_space["identifier"]]
+    assert OpenLease(state_root).snapshot().spaces == ()
+
+
+def test_cli_explicit_space_precedes_cwd_session_selection(
+    tmp_path: Path, monkeypatch
+) -> None:
+    state_root = tmp_path / "state"
+    repository = _repository(tmp_path / "repo")
+    system = OpenLease(state_root)
+    system.register_repository("repo", repository)
+    system.create_space("durable")
+    monkeypatch.chdir(repository)
+
+    selected = CliRunner().invoke(
+        app,
+        [
+            "--state-root",
+            str(state_root),
+            "--space",
+            "durable",
+            "--json",
+            "status",
+        ],
+        env={"OPENLEASE_SESSION_TOKEN": "host-session"},
+    )
+
+    assert selected.exit_code == 0, selected.output
+    assert json.loads(selected.stdout)["data"]["spaces"][0]["identifier"] == "durable"
+    assert tuple(space.identifier for space in system.snapshot().spaces) == ("durable",)
+
+
+def test_cli_reports_an_invalid_cwd_session_without_a_traceback(
+    tmp_path: Path, monkeypatch
+) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    monkeypatch.chdir(outside)
+
+    failed = CliRunner().invoke(
+        app,
+        ["--state-root", str(tmp_path / "state"), "--json", "status"],
+        env={"OPENLEASE_SESSION_TOKEN": "host-session"},
+    )
+
+    assert failed.exit_code == 2
+    assert "Traceback" not in failed.stderr
+    assert json.loads(failed.stderr)["outcome"] == "invalid_request"
+
+
 def test_cli_preserves_an_omitted_worktree_base(tmp_path: Path, monkeypatch) -> None:
     captured: dict[str, Path | None] = {}
 

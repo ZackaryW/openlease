@@ -51,6 +51,7 @@ app.add_typer(pack_app, name="pack")
 class Context:
     lifecycle: OpenLease
     space: str | None
+    session_token: str | None
     json_output: bool
 
 
@@ -73,6 +74,14 @@ def configure(
         str | None,
         typer.Option("--space", envvar="OPENLEASE_SPACE", help="Selected space."),
     ] = None,
+    session_token: Annotated[
+        str | None,
+        typer.Option(
+            "--session-token",
+            envvar="OPENLEASE_SESSION_TOKEN",
+            help="Opaque host-session token for cwd temporary selection.",
+        ),
+    ] = None,
     json_output: Annotated[
         bool, typer.Option("--json", help="Emit one JSON result envelope.")
     ] = False,
@@ -84,7 +93,9 @@ def configure(
     base = worktree_base or (
         Path(configured_base).expanduser().resolve() if configured_base else None
     )
-    ctx.obj = Context(OpenLease(root, worktree_base=base), space, json_output)
+    ctx.obj = Context(
+        OpenLease(root, worktree_base=base), space, session_token, json_output
+    )
 
 
 def _context(ctx: typer.Context) -> Context:
@@ -93,9 +104,19 @@ def _context(ctx: typer.Context) -> Context:
 
 def _space(context: Context, explicit: str | None) -> str:
     selected = explicit or context.space
-    if not selected:
-        raise typer.BadParameter("select a space with --space or OPENLEASE_SPACE")
-    return selected
+    if selected:
+        return selected
+    if not context.session_token:
+        raise typer.BadParameter(
+            "select a space or provide OPENLEASE_SESSION_TOKEN for cwd selection"
+        )
+    resolved = context.lifecycle.resolve_session_space(
+        Path.cwd(), context.session_token
+    )
+    identifier = getattr(resolved.data, "identifier", None)
+    if not isinstance(identifier, str):
+        raise InvalidRequest("temporary selection returned no space identity")
+    return identifier
 
 
 def _run(context: Context, operation: Callable[[], CommandResult]) -> None:
@@ -359,7 +380,18 @@ def session_close(
     space: Annotated[str | None, typer.Option("--space")] = None,
 ) -> None:
     context = _context(ctx)
-    _run(context, lambda: context.lifecycle.close_session(_space(context, space)))
+    selected = space or context.space
+    if selected is not None:
+        _run(context, lambda: context.lifecycle.close_session(selected))
+        return
+    if not context.session_token:
+        raise typer.BadParameter(
+            "select a space or provide OPENLEASE_SESSION_TOKEN to close"
+        )
+    _run(
+        context,
+        lambda: context.lifecycle.close_temporary_session(context.session_token or ""),
+    )
 
 
 @space_app.command("associate")
@@ -437,7 +469,14 @@ def status(
     space: Annotated[str | None, typer.Option("--space")] = None,
 ) -> None:
     context = _context(ctx)
-    _run(context, lambda: context.lifecycle.status(space or context.space))
+
+    def inspect() -> CommandResult:
+        selected = space or context.space
+        if selected is None and context.session_token:
+            selected = _space(context, None)
+        return context.lifecycle.status(selected)
+
+    _run(context, inspect)
 
 
 @app.command("plan")

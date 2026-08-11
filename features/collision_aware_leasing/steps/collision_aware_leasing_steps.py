@@ -381,3 +381,94 @@ def still_locked_after_boundary(context) -> None:
         ).status
         == "locked"
     )
+
+
+@given("implicit cwd selection created a temporary space for a registered worktree")
+def implicit_temporary_space(context) -> None:
+    ensure_topology(context)
+    context.selected = context.system.resolve_session_space(
+        context.repos["repo-1"], "host-session"
+    ).data.identifier
+
+
+@when("the owner has not declared an affected claim")
+def attempt_unclaimed_temporary_lock(context) -> None:
+    capture(context, lambda: context.system.lockable(context.selected))
+    context.first_error = context.error
+    capture(context, lambda: context.system.lock(context.selected))
+
+
+@then("lockable and lock reject acquisition")
+def temporary_lock_rejected(context) -> None:
+    assert isinstance(context.first_error, InvalidRequest)
+    assert isinstance(context.error, InvalidRequest)
+
+
+@then("the session token, cwd, association, and temporary ownership grant no lease")
+def implicit_context_grants_no_lease(context) -> None:
+    assert context.system.snapshot().leases == ()
+
+
+@given(
+    "a cwd-selected temporary space explicitly affects an authority covered by "
+    "another active lease"
+)
+def conflicting_temporary_space(context) -> None:
+    ensure_topology(context)
+    space(context, "owner", authorities=("a",))
+    context.system.lock("owner")
+    temporary = context.system.resolve_session_space(
+        context.repos["repo-1"], "host-session"
+    ).data
+    context.system.set_affected(temporary.identifier, authority_ids=("a",))
+    context.selected = temporary.identifier
+
+
+@when("the temporary space runs lockable or lock")
+def temporary_space_checks_lock(context) -> None:
+    context.lockable_result = context.system.lockable(context.selected)
+    capture(context, lambda: context.system.lock(context.selected))
+
+
+@then("OpenLease reports the same logical conflict as an explicitly selected space")
+def temporary_conflict_reported(context) -> None:
+    assert context.lockable_result.data["lockable"] is False
+    assert context.lockable_result.data["conflicts"][0].owner_id == "owner"
+    assert isinstance(context.error, AuthorityConflict)
+
+
+@then("no losing lease is acquired")
+def temporary_loser_unleased(context) -> None:
+    assert not any(
+        item.owner_id == context.selected for item in context.system.snapshot().leases
+    )
+
+
+@given(
+    "a cwd-selected temporary space explicitly affects a disconnected authority "
+    "component"
+)
+def unrelated_temporary_space(context) -> None:
+    ensure_topology(context)
+    temporary = context.system.resolve_session_space(
+        context.repos["repo-3"], "host-session"
+    ).data
+    context.system.set_affected(temporary.identifier, authority_ids=("shared",))
+    context.selected = temporary.identifier
+
+
+@given("another component has an active lease")
+def another_component_active(context) -> None:
+    space(context, "owner", authorities=("a",))
+    context.system.lock("owner")
+
+
+@when("the temporary space plans its complete affected closure")
+def plan_temporary_closure(context) -> None:
+    context.result = context.system.plan(context.selected)
+
+
+@then("the unrelated active lease does not block the plan")
+def unrelated_lease_does_not_block(context) -> None:
+    assert context.result.data.held_authorities == ("shared",)
+    assert context.system.lockable(context.selected).data["lockable"] is True

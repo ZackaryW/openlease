@@ -416,3 +416,207 @@ def ownership_conflict(context) -> None:
 @then("preserves the modified projection and unrelated user worksets")
 def projections_preserved(context) -> None:
     assert set(context.openspec.worksets) == {"openlease-selected", "user-workset"}
+
+
+@given("a registered repository has no matching temporary space")
+def registered_repo_without_temporary_space(context) -> None:
+    ensure_topology(context)
+
+
+@when(
+    "successive commands omit explicit space selection from directories within "
+    "its worktree and use one host-session token"
+)
+def resolve_repeated_cwd_selection(context) -> None:
+    nested = context.repos["repo-1"] / "nested"
+    nested.mkdir()
+    context.temporary_results = (
+        context.system.resolve_session_space(nested, "host-session"),
+        context.system.resolve_session_space(context.repos["repo-1"], "host-session"),
+    )
+    context.selected = context.temporary_results[-1].data.identifier
+
+
+@then("OpenLease selects one temporary draft associated with that repository")
+def one_temporary_draft_selected(context) -> None:
+    first, second = (result.data for result in context.temporary_results)
+    assert first.identifier == second.identifier
+    assert second.associated_repository_ids == ("repo-1",)
+    assert len(context.system.snapshot().spaces) == 1
+
+
+@then("the draft has no affected claim or lease")
+def temporary_draft_has_no_claim_or_lease(context) -> None:
+    selected = context.system.status(context.selected).data["spaces"][0]
+    assert selected.affected_repository_ids == ()
+    assert selected.affected_authority_ids == ()
+    assert selected.held_authority_ids == ()
+    assert context.system.snapshot().leases == ()
+
+
+@then("no topology is inferred from the working directory")
+def cwd_infers_no_topology(context) -> None:
+    state = context.system.snapshot()
+    assert len(state.repositories) == 3
+    assert len(state.authorities) == 4
+
+
+@given("a host-session token and cwd could select a temporary space")
+def implicit_selection_context(context) -> None:
+    ensure_topology(context)
+
+
+@given("a durable space is explicitly selected")
+def explicit_durable_selection(context) -> None:
+    space(context, "durable")
+    context.selected = "durable"
+
+
+@when("OpenLease resolves the command context")
+def resolve_explicit_command_context(context) -> None:
+    context.result = context.system.select_space(context.selected)
+
+
+@then("it selects the explicit durable space")
+def explicit_space_selected(context) -> None:
+    assert context.result.data["space"] == "durable"
+
+
+@then("creates or reclaims no temporary space")
+def no_temporary_space_created(context) -> None:
+    assert all(item.temporary is None for item in context.system.snapshot().spaces)
+
+
+@given("cwd does not resolve uniquely to one registered Git worktree")
+def unresolved_cwd(context) -> None:
+    ensure_repositories(context)
+    context.cwd = context.repos["repo-1"]
+
+
+@when("a command omits explicit space selection")
+def resolve_unselected_command(context) -> None:
+    capture(
+        context,
+        lambda: context.system.resolve_session_space(context.cwd, "host-session"),
+    )
+
+
+@then("OpenLease rejects implicit selection")
+def implicit_selection_rejected(context) -> None:
+    assert isinstance(context.error, InvalidRequest)
+
+
+@then("creates no space or topology")
+def no_space_or_topology_created(context) -> None:
+    state = context.system.snapshot()
+    assert state.spaces == ()
+    assert state.repositories == ()
+    assert state.authorities == ()
+
+
+@given("an ended host session left a clean temporary draft for one canonical worktree")
+def abandoned_clean_temporary_draft(context) -> None:
+    ensure_topology(context)
+    context.abandoned = context.system.resolve_session_space(
+        context.repos["repo-1"], "session-a"
+    ).data
+
+
+@when("a new host session implicitly selects that worktree")
+def new_session_selects_worktree(context) -> None:
+    context.result = context.system.resolve_session_space(
+        context.repos["repo-1"], "session-b"
+    )
+
+
+@then("OpenLease rebinds the existing draft to the new session atomically")
+def abandoned_draft_rebound(context) -> None:
+    assert context.result.data.identifier == context.abandoned.identifier
+    assert context.result.data.temporary != context.abandoned.temporary
+
+
+@then("preserves its space identity and complete draft shape")
+def reclaimed_shape_preserved(context) -> None:
+    assert context.result.data.associated_repository_ids == (
+        context.abandoned.associated_repository_ids
+    )
+    assert context.result.data.affected_authority_ids == (
+        context.abandoned.affected_authority_ids
+    )
+
+
+@given("a prior matching space carries lease, configuration, or recovery evidence")
+def retained_matching_space(context) -> None:
+    ensure_topology(context)
+    temporary = context.system.resolve_session_space(
+        context.repos["repo-1"], "session-a"
+    ).data
+    context.system.set_affected(temporary.identifier, authority_ids=("a",))
+    context.retained = context.system.lock(temporary.identifier).data
+
+
+@then("OpenLease preserves the prior space and its evidence unchanged")
+def retained_space_preserved(context) -> None:
+    current = context.system.status(context.retained.identifier).data["spaces"][0]
+    assert current == context.retained
+    assert current.held_authority_ids == ("a",)
+
+
+@then("scaffolds a distinct temporary draft for the new session")
+def distinct_temporary_draft_created(context) -> None:
+    assert context.result.data.identifier != context.retained.identifier
+    assert context.result.data.temporary is not None
+
+
+@given("a host session owns a temporary space that remains fully disposable")
+def host_owns_disposable_space(context) -> None:
+    ensure_topology(context)
+    context.temporary_space = context.system.resolve_session_space(
+        context.repos["repo-1"], "host-session"
+    ).data
+
+
+@when("that host session closes")
+def close_host_session(context) -> None:
+    context.result = context.system.close_temporary_session("host-session")
+
+
+@then("OpenLease removes only that temporary space")
+def removes_only_temporary_space(context) -> None:
+    assert context.result.data["removed"] == (context.temporary_space.identifier,)
+    assert context.system.snapshot().spaces == ()
+
+
+@then("preserves registered topology and every other space")
+def topology_preserved_after_temporary_close(context) -> None:
+    state = context.system.snapshot()
+    assert len(state.repositories) == 3
+    assert len(state.authorities) == 4
+
+
+@given("a host session owns a temporary space with a complete explicit affected claim")
+def temporary_space_with_complete_claim(context) -> None:
+    ensure_topology(context)
+    temporary = context.system.resolve_session_space(
+        context.repos["repo-1"], "host-session"
+    ).data
+    context.system.set_affected(temporary.identifier, authority_ids=("a",))
+    context.selected = temporary.identifier
+
+
+@when("the space atomically acquires its complete lease set")
+def temporary_space_locks(context) -> None:
+    context.result = context.system.lock(context.selected)
+
+
+@then("OpenLease clears its temporary ownership in the same transition")
+def temporary_ownership_cleared(context) -> None:
+    assert context.result.data.temporary is None
+
+
+@then("retains it as a durable locked space after the host session disappears")
+def promoted_lock_remains_durable(context) -> None:
+    assert context.system.close_temporary_session("host-session").changed is False
+    retained = context.system.status(context.selected).data["spaces"][0]
+    assert retained.status == "locked"
+    assert retained.held_authority_ids == ("a",)
